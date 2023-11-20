@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader, Dataset
 from utils import DatasetCreater
 from utils.constants import (
     AUDIO_MODELS_TRAIN,
+    FAKE,
+    ORIGINAL,
     TRAIN_GROUP,
     VISUAL_BLENDINGS_TRAIN,
     VISUAL_MODELS_TRAIN,
@@ -27,10 +29,24 @@ class SwanDataset(Dataset):
         self.target_sample_rate = 16000
         self.feat_len = 750
 
-        self.lfcc_transform = T.LFCC(
-            sample_rate = self.target_sample_rate,
-            n_lfcc = 40
+
+        self.lfcc_transform = torchaudio.transforms.LFCC(
+            sample_rate=16000,
+            n_filter=20,
+            f_min=0.0,
+            f_max=None,
+            n_lfcc=60, # Assuming you want the same number of coefficients as filters
+            dct_type=2,
+            norm='ortho',
+            log_lf=False,
+            speckwargs={"n_fft": 512, "win_length": 320, "hop_length": 160, "center": False}
         )
+
+
+        # self.lfcc_transform = T.LFCC(
+        #     sample_rate = self.target_sample_rate,
+        #     n_lfcc = 40
+        # )
           
 
         self.load_data(dataset_type=dataset_type)
@@ -44,9 +60,36 @@ class SwanDataset(Dataset):
     def __getitem__(self, idx):
         # implement audio and visual
         row = self.df.iloc[idx]
+        target = row["target"]
+
+        if target == FAKE:
+            return self.__get_fake_item__(row)
+        else:
+            return self.__get_real_item__(row)
+
+
+
+    
+    def __get_fake_item__(self, row):
         audio_dir = row["audio_dir"]
+        video_dir = row["video_dir"]
         waveform , sample_rate  = torchaudio.load(audio_dir)
 
+        lfcc = self.__process_lfcc__(waveform)
+
+        target = row["target"]
+        
+        return lfcc, target
+
+    def __get_real_item__(self, row):
+        vidio_dir = row["video_dir"]
+        waveform , sample_rate  = torchaudio.load(vidio_dir)
+
+        lfcc = self.__process_lfcc__(waveform)
+
+        return lfcc, row["target"]
+    
+    def __process_lfcc__(self, waveform):
         lfcc = self.lfcc_transform(waveform)
 
         # adjust feature dim length
@@ -56,13 +99,7 @@ class SwanDataset(Dataset):
             lfcc = lfcc[:,:,  startp:startp + self.feat_len]
         if this_lfcc_len < self.feat_len:
             lfcc = padding(lfcc, self.feat_len)
-        # lfcc shape 
-        # [1, 40, 750]
-        
-
-        target = row["target"]
-        
-        return lfcc, target
+        return lfcc
 
     def load_data(self, dataset_type:str):
         if not os.path.exists(CSV_PATH):

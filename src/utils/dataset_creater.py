@@ -1,31 +1,51 @@
 import os
 
+import numpy as np
 import pandas as pd
 
 from utils.constants import (
     AUDIO_MODELS_TRAIN,
+    FAKE,
+    ORIGINAL,
     TRAIN_GROUP,
     VISUAL_BLENDINGS_TRAIN,
     VISUAL_MODELS_TRAIN,
+    get_train_test_subjects,
 )
 
 SWAN_DIR = "/storage/neil/SWAN-DF/SWAN-DF/"
-
+ORIGINAL_SWAN_DIR = "/storage/neil/SWAN/SWAN-Idiap/IDIAP/session_01"
 
 class DatasetCreater:
     
     def __init__(self):
         self.dataset_dir = SWAN_DIR
+        self.original_video_names = []
         self.get_files()
         self.create_df()
 
     def create_df(self):
-        # print(len(self.visual.keys()))
+
+
+        data = []
+        self.get_fake_data(data)
+        self.get_original_data(data)
+
+        self.df = pd.DataFrame(data).sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+        print(f"total_count: {len(self.df)}")
+        self.df.to_csv("./utils/swan_df.csv")
+
+
+
+
+    def get_fake_data(self, data:list):
+       # iterate through all the keys
         def check_valid(video_row, audio_row):
             if video_row["subject1"] != audio_row["subject1"] or video_row["subject2"] != audio_row["subject2"]:
                 raise ValueError("subject1 and subject2 are not the same")
-        data = []
-        # iterate through all the keys
+
         for key in self.keys:
             for _, video_row in self.visual_df[self.visual_df["key"] == key].iterrows():
                 for _,audio_row in self.audio_df[self.audio_df["key"] == key].iterrows():
@@ -47,13 +67,10 @@ class DatasetCreater:
 
                         "video_dir": video_row["file_dir"],
                         "audio_dir": audio_row["file_dir"],
-                        "target" : 1
+                        "target" : FAKE
                     })
 
-        self.df = pd.DataFrame(data)
-        print(f"total_count: {len(self.df)}")
-        self.df.to_csv("./utils/swan_df.csv")
-                    
+
     def check_group(self, video_model, blending_name, audio_model, pair):
         # train
         # seen visual   & seen audio model
@@ -112,6 +129,9 @@ class DatasetCreater:
         bledning_name = file_split[3].split("_")[1]
         subject2 = file_split[-1].split(".")[0]
         key = video_name+"_"+subject2
+
+        # store video names for future use (original video)
+        self.original_video_names.append(video_name)
 
         return key, subject2, video_name, model_name, bledning_name
 
@@ -177,6 +197,62 @@ class DatasetCreater:
 
         # get keys
         self.keys = self.visual_df["key"].unique()
+    
+    def get_original_data(self, data):
+        def divide_list_into_three(test_dir):
+            # Calculate the size of each chunk
+            length = len(test_dir)
+            chunk_size = length // 3
+
+            # Create three separate lists
+            first = test_dir[:chunk_size]
+            second = test_dir[chunk_size:2*chunk_size]
+            third = test_dir[2*chunk_size:]
+
+
+            return first, second, third
+        
+        def update_data_with_dirs(dirs:list, data:list, group:str):
+            for dir in dirs:
+                data.append({
+                    "video_dir": dir,
+                    "group": group,
+                    "target" : ORIGINAL
+                })
+
+
+        # iterate through all the files
+        train_subjects, test_subjects = get_train_test_subjects()
+
+        train_dirs = []
+        test_dirs = []
+        # collect train and test dirs
+        for root, _ ,filenames in os.walk(ORIGINAL_SWAN_DIR):
+            for filename in filenames:
+                if "png" in filename:
+                    continue
+                video_name = filename.split(".")[0]
+                if video_name in self.original_video_names:
+                    subject = video_name.split("_")[1]
+                    total_filename = os.path.join(root, filename)
+
+                    if subject in train_subjects:
+                        train_dirs.append(total_filename)
+                    elif subject in test_subjects:
+                        test_dirs.append(total_filename)
+                    else:
+                        raise ValueError("subject not in train or test")
+        print(f"train_count: {len(train_dirs)}")
+        # split test set into test1, test2, test3 and add to data
+        test1_dirs , test2_dirs, test3_dirs = divide_list_into_three(test_dirs)
+        update_data_with_dirs(train_dirs, data, "train")
+        update_data_with_dirs(test1_dirs, data, "test1")
+        update_data_with_dirs(test2_dirs, data, "test2")
+        update_data_with_dirs(test3_dirs, data, "test3")
+        
+
+        
+
 
 
 
