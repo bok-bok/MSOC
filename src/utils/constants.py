@@ -7,6 +7,8 @@ AUDIO_MODELS_TRAIN = ['freevc-pretrained-tuned70k', 'freevc-smodel-notuning',
        'freevc-24hz-notuning', 'freevc-fromscratch-trained50k',
        'freevc-pretrained-tuned109k', 'freevc-pretrained-tuned40k' 'freevc-fromscratch-trained109k']
 
+FAKE = 1
+ORIGINAL = 0
 
 
 
@@ -25,3 +27,17 @@ TRAIN_GROUP = ['00026_00024' ,'00035_00016', '00004_00002', '00004_00014', '0002
  '00048_00055' ,'00033_00032' ,'00033_00040'  ,'00043_00058',
  '00016_00035' ,'00016_00005' ,'00050_00018' ,'00025_00028' ,'00019_00048',
  '00011_00027'  ,'00013_00012' ,'00013_00029' ,'00014_00004']
+
+def get_train_test_subjects():
+       train_subjects = set()
+       test_subjects = set()
+       for pair in TRAIN_GROUP:
+              subject1, subject2 = pair.split("_")
+              train_subjects.add(subject1)
+              train_subjects.add(subject2)
+       
+       for pair in TEST_GROUP:
+              subject1, subject2 = pair.split("_")
+              test_subjects.add(subject1)
+              test_subjects.add(subject2)
+       return train_subjects, test_subjects
