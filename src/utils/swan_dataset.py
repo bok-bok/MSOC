@@ -120,7 +120,11 @@ class SwanDataset(Dataset):
     def get_df(self, dataset_type: str):
         df = pd.read_csv(CSV_PATH)
         df = df[df["group"] == dataset_type]
-        df = self.__get_balance_dataset__(df)
+        # df = self.__get_balance_dataset__(df)
+        fake_count = len(df[df["target"] == FAKE])
+        real_count = len(df[df["target"] == ORIGINAL])
+        print(f"real count: {real_count} fake count: {fake_count}")
+
         return df
 
 
