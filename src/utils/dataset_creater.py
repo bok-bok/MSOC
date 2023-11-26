@@ -14,7 +14,7 @@ from utils.constants import (
 )
 
 SWAN_DIR = "/storage/neil/SWAN-DF/SWAN-DF/"
-ORIGINAL_SWAN_DIR = "/storage/neil/SWAN/SWAN-Idiap/IDIAP/session_01"
+ORIGINAL_SWAN_DIR = "/storage/neil/SWAN/SWAN-Idiap/IDIAP"
 
 
 class DatasetCreater:
@@ -233,13 +233,11 @@ class DatasetCreater:
                     subject = video_name.split("_")[1]
                     total_filename = os.path.join(root, filename)
 
-                    if subject in train_subjects:
-                        train_dirs.append(total_filename)
-                    elif subject in test_subjects:
+                    if subject in test_subjects:
                         test_dirs.append(total_filename)
                     else:
-                        print(f"subject not in train or test: {subject}")
-                        
+                        train_dirs.append(total_filename)
+
                         # raise ValueError("subject not in train or test")
         print(f"train_count: {len(train_dirs)}")
         # split test set into test1, test2, test3 and add to data
