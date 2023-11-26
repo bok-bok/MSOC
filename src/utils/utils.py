@@ -1,9 +1,14 @@
+import os
+
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.decomposition import PCA
 
 
-def plot_pca(features, labels, epoch=None):
+def plot_pca(features, labels, dataset_type, epoch=None):
+    if dataset_type not in ["train", "test"]:
+        raise ValueError("type must be either train or test")
+
     plt.figure(figsize=(10, 10))
     pca = PCA(n_components=2)
     pca_features = pca.fit_transform(features)
@@ -20,4 +25,7 @@ def plot_pca(features, labels, epoch=None):
 
     plt.legend()
 
-    plt.savefig(f"plots/pca_{epoch}.png", dpi=300)
+    save_dir = f"plots/{dataset_type}"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    plt.savefig(f"{save_dir}/{epoch}.png", dpi=300)
