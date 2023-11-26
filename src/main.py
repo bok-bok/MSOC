@@ -1,3 +1,5 @@
+import argparse
+import logging
 import sys
 
 import pandas as pd
@@ -11,6 +13,15 @@ from tqdm import tqdm
 import eval_metrics as em
 from audio import OCSoftmax, ResNet
 from utils import SwanDataset, plot_pca
+
+
+def init_params():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--num_epochs", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=0.00001)
+    parser.add_argument("--batch_size", type=int, default=64)
+
 
 if __name__ == "__main__":
     early_stop_cnt = 0
@@ -47,11 +58,18 @@ if __name__ == "__main__":
     lfcc_optimizer = torch.optim.AdamW(lfcc_model.parameters(), lr=lr, weight_decay=0.0005)
     lfcc_scheduler = CosineAnnealingLR(lfcc_optimizer, T_max=epochs, eta_min=0.00001)
 
+    logging.basicConfig(
+        filename="training_log.log",
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s:%(message)s",
+    )
+
     for epoch in range(epochs):
         lfcc_model.train()
         total_loss = 0
         train_correct = 0
         train_total = 0
+        train_idx_loader, train_features_loader, train_scores = [], [], []
         for data, labels in tqdm(train_dataloader):
             data = data.to(device)
             labels = labels.to(device)
@@ -63,7 +81,7 @@ if __name__ == "__main__":
             # lfcc_loss = criterion(outputs, labels)
 
             # oc softmax
-            ocsoftmaxloss, _ = ocsoftmax(feats, labels)
+            ocsoftmaxloss, scores = ocsoftmax(feats, labels)
             lfcc_loss = ocsoftmaxloss
             ocsoftmax_optimzer.zero_grad()
             lfcc_optimizer.zero_grad()
@@ -71,6 +89,19 @@ if __name__ == "__main__":
             lfcc_optimizer.step()
             ocsoftmax_optimzer.step()
             total_loss += lfcc_loss.item()
+
+            train_features_loader.append(feats)
+            train_idx_loader.append(labels)
+            train_scores.append(scores)
+        # plot pca for train
+        train_features = torch.cat(train_features_loader, dim=0).data.cpu().numpy()
+        train_labels = torch.cat(train_idx_loader, 0).data.cpu().numpy()
+        plot_pca(features=train_features, labels=train_labels, dataset_type="train", epoch=epoch)
+
+        train_scores = torch.cat(train_scores, 0).data.cpu().numpy()
+        train_eer = em.compute_eer(
+            train_scores[train_labels == 0], train_scores[train_labels == 1]
+        )[0]
 
         lfcc_model.eval()
         with torch.no_grad():
@@ -96,13 +127,15 @@ if __name__ == "__main__":
         labels = torch.cat(idx_loader, 0).data.cpu().numpy()
         features = torch.cat(features_loader, dim=0).data.cpu().numpy()
 
-        plot_pca(features=features, labels=labels, epoch=epoch)
+        plot_pca(features=features, labels=labels, dataset_type="test", epoch=epoch)
 
         val_eer = em.compute_eer(scores[labels == 0], scores[labels == 1])[0]
 
-        print(
-            f"epoch: {epoch}, train_loss : {total_loss} , val_eer: {val_eer}, cnt : {early_stop_cnt}"
+        result = (
+            f"epoch: {epoch}, train_eer : {train_eer} , val_eer: {val_eer}, cnt : {early_stop_cnt}"
         )
+        print(result)
+        logging.info(result)
         if val_eer < prev_eer:
             prev_eer = val_eer
             torch.save(lfcc_model.state_dict(), f"{out_folder}/lfcc_model.pt")
