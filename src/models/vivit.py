@@ -3,8 +3,9 @@ import torch
 import torch.nn.functional as F
 from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
-from module import Attention, FeedForward, PreNorm
 from torch import einsum, nn
+
+from models.module import Attention, FeedForward, PreNorm
 
 
 class Transformer(nn.Module):
@@ -96,8 +97,10 @@ class ViViT(nn.Module):
         x = self.temporal_transformer(x)
 
         x = x.mean(dim=1) if self.pool == "mean" else x[:, 0]
-
-        return self.mlp_head(x)
+        output = self.mlp_head(x)
+        feat = x
+        return output, feat
+        # return self.mlp_head(x)
 
 
 if __name__ == "__main__":
