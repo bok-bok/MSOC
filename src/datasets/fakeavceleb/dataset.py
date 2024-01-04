@@ -13,31 +13,14 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+from utils.augmentation import *
 from utils.constants import FAKE, ORIGINAL
-
-video_transform = T.Compose(
-    [
-        T.Resize((224, 224)),
-        T.ToTensor(),
-        T.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        ),
-    ]
-)
 
 
 def pil_loader(path):
     with open(path, "rb") as f:
         img = Image.open(f)
         return img.convert("RGB")
-
-
-def _load_and_transform_frame(path: str):
-    print("loading", path)
-    img = pil_loader(path)
-    img = video_transform(img)
-    return img
 
 
 class FakeAVDataset(Dataset):
@@ -58,12 +41,14 @@ class FakeAVDataset(Dataset):
             n_mels=80,
         )
 
+        self.video_transform = transforms.Compose([Scale(size=(224, 224)), ToTensor(), Normalize()])
+
     def __getitem__(self, index):
         row = self.df.iloc[index]
 
         directory = row["preprocessed_directory"]
 
-        # frames = self._load_frames(directory)
+        frames = self._load_frames(directory)
         spectrogram = self._load_audio(directory)
 
         # get label
@@ -73,8 +58,8 @@ class FakeAVDataset(Dataset):
         else:
             label = FAKE
 
-        return spectrogram, label
-        # return frames, spectrogram, label
+        # return spectrogram, label
+        return frames, spectrogram, label
 
     def _load_frames(self, directory: str):
         # load fixed number of frames
@@ -90,13 +75,9 @@ class FakeAVDataset(Dataset):
         if frame_num > self.video_target_frames:
             sorted_frames_files = sorted_frames_files[: self.video_target_frames]
 
-        # load frames
-
-        # seq = [pil_loader(os.path.join(frame_dir, img)) for img in sorted_frames_files]
-        # t_seq = [self.video_transform(img) for img in seq]
-        full_path = [os.path.join(frame_dir, img) for img in sorted_frames_files]
-        with Pool() as p:
-            t_seq = p.map(_load_and_transform_frame, full_path)
+        # load and transform frames
+        seq = [pil_loader(os.path.join(frame_dir, img)) for img in sorted_frames_files]
+        t_seq = self.video_transform(seq)
         t_seq = torch.stack(t_seq, 0)
 
         # pad frames to target number
