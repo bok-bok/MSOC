@@ -7,7 +7,8 @@ import torchaudio
 import torchaudio.transforms as T
 from torch.utils.data import DataLoader, Dataset
 
-from utils import DatasetCreater
+# from utils import DatasetCreater
+from datasets.SwanAV.dataset_creater import DatasetCreater
 from utils.constants import (
     AUDIO_MODELS_TRAIN,
     FAKE,
@@ -18,7 +19,7 @@ from utils.constants import (
 )
 
 SWAN_DIR = "/storage/neil/SWAN-DF/SWAN-DF/"
-CSV_PATH = "./utils/swan_df.csv"
+CSV_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "swan_df.csv"))
 
 
 class SwanDataset(Dataset):
