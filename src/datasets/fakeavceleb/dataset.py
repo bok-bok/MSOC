@@ -13,7 +13,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
-from utils.augmentation import *
+from data.augmentation import *
 from utils.constants import FAKE, ORIGINAL
 
 
@@ -24,10 +24,9 @@ def pil_loader(path):
 
 
 class FakeAVDataset(Dataset):
-    def __init__(self, frame_num, dataset_type):
+    def __init__(self, frame_num, classifier_type, dataset_type):
         # load data
-        self.csv_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "data.csv")
-        self.df = pd.read_csv(self.csv_path)
+        self._load_data(classifier_type, dataset_type)
 
         # set target frame number
         self.video_target_frames = frame_num
@@ -42,6 +41,53 @@ class FakeAVDataset(Dataset):
         )
 
         self.video_transform = transforms.Compose([Scale(size=(224, 224)), ToTensor(), Normalize()])
+
+    def _load_data(self, classifier_type: str, dataset_type: str):
+        """
+        Load and preprocess data from csv file
+        Args:
+            classifier_type (str): V, A, AV
+            dataset_type (str): train, test
+        """
+
+        # check input values
+        if classifier_type not in ["V", "A", "AV"]:
+            raise ValueError("classifier_type should be one of V, A, AV")
+        if dataset_type not in ["train", "test"]:
+            raise ValueError("dataset_type should be one of train, test")
+
+        def get_labeled_df(classifier_type: str, df: pd.DataFrame):
+            if classifier_type == "V":
+                fakeset = ["FakeVideo-RealAudio", "FakeVideo-FakeAudio"]
+            elif classifier_type == "A":
+                fakeset = ["RealVideo-FakeAudio", "FakeVideo-FakeAudio"]
+            elif classifier_type == "AV":
+                fakeset = ["FakeVideo-RealAudio", "RealVideo-FakeAudio", "FakeVideo-FakeAudio"]
+
+            df["label"] = df["type"].apply(lambda x: FAKE if x in fakeset else ORIGINAL)
+            return df
+
+        self.csv_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "data.csv")
+        self.df = pd.read_csv(self.csv_path)
+
+        # set 70 sources for test
+        self.test_source = self.df["source"].unique()[:70]
+
+        if dataset_type == "train":
+            self.df = self.df[~self.df["source"].isin(self.test_source)]
+        elif dataset_type == "test":
+            self.df = self.df[self.df["source"].isin(self.test_source)]
+
+        self.df = get_labeled_df(classifier_type, self.df)
+
+        fake_count = len(self.df[self.df["label"] == FAKE])
+        real_count = len(self.df[self.df["label"] == ORIGINAL])
+
+        # print dataset config and label count
+        print(f"Dataset config : {classifier_type}, {dataset_type}")
+        print(f"fake: {fake_count}, real: {real_count}")
+
+        # set label based on classifier type
 
     def __getitem__(self, index):
         row = self.df.iloc[index]
@@ -246,3 +292,12 @@ class AudiosetDataset(Dataset):
 
     def __len__(self):
         return len(self.data)
+
+
+if __name__ == "__main__":
+    classifier_types = ["V", "A", "AV"]
+    dataset_types = ["train", "test"]
+
+    for classifier_type in classifier_types:
+        for dataset_type in dataset_types:
+            dataset = FakeAVDataset(30, classifier_type, dataset_type)
