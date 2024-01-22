@@ -29,3 +29,4 @@ def plot_pca(features, labels, dataset_type, epoch=None):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     plt.savefig(f"{save_dir}/{epoch}.png", dpi=300)
+    plt.close()
