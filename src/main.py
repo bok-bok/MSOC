@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import sys
 
 import pandas as pd
@@ -11,141 +12,218 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import eval_metrics as em
-from audio import OCSoftmax, ResNet
-from utils import SwanDataset, plot_pca
+import wandb
+from datasets import FakeAVDataset, SwanDataset
+from engine_lr import get_outputs_feats
+from loss import OCSoftmax
+from models import ASTModel, ViViT
+
+# from models.model import EnsembleModel
+# from util import plot_pca
 
 
-def init_params():
+def get_args():
     parser = argparse.ArgumentParser()
 
+    # training
     parser.add_argument("--num_epochs", type=int, default=100)
-    parser.add_argument("--lr", type=float, default=0.00001)
+    parser.add_argument("--lr", type=float, default=0.0003)
+    parser.add_argument("--lr_decay", type=float, default=0.5, help="lr decay rate")
+    parser.add_argument("--interval", type=int, default=10, help="interval to decay lr")
+
+    parser.add_argument("--beta_1", type=float, default=0.9, help="bata_1 for Adam")
+    parser.add_argument("--beta_2", type=float, default=0.999, help="beta_2 for Adam")
+    parser.add_argument("--eps", type=float, default=1e-8, help="epsilon for Adam")
+
+    parser.add_argument("--epochs", type=int, default=100, help="Number of epochs for training")
     parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument(
+        "--add_loss",
+        type=str,
+        default="ocsoftmax",
+        choices=["softmax", "ocsoftmax"],
+        help="loss for one-class training",
+    )
+    parser.add_argument("--r_real", type=float, default=0.9)
+    parser.add_argument("--r_fake", type=float, default=0.2)
+    parser.add_argument("--alpha", type=float, default=20, help="scale factor for ocsoftmax")
+    # parser.add_argument("--enc_dim", type=int, default=768, help="encoder dimension")
+
+    parser.add_argument("--gpu", type=str, help="GPU index", default="2")
+    parser.add_argument("--num_workers", type=int, default=8)
+    parser.add_argument("--seed", type=int, default=42)
+
+    # Dataset
+    parser.add_argument("--dataset", type=str, default="fakeavceleb")
+    parser.add_argument("--frame_num", type=int, default=30)
+
+    # Model
+    parser.add_argument("--classifier_type", type=str, default="A", choices=["A", "V", "AV"])
+    # parser.add_argument("--decision_type", type=str, default="mv", choices=["mv", "asf", "sf", "ff"])
+
+    args = parser.parse_args()
+
+    # set device
+    args.device = f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu"
+    return args
+
+
+def adjust_learning_rate(args, optimizer, epoch_num):
+    lr = args.lr * (args.lr_decay ** (epoch_num // args.interval))
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = lr
 
 
 if __name__ == "__main__":
+    args = get_args()
+    prev_acc = None
+    WAB = True
     early_stop_cnt = 0
-    out_folder = "audio/weights"
-    train_dataset = SwanDataset("train")
-    test_dataset = SwanDataset("test3")
-    device = "cuda:0"
-    enc_dim = 256
-    epochs = 100
-    devices = [0, 3]
-    lr = 0.00001
-    prev_eer = 1e8
+
+    # get dataset
+    if args.dataset == "fakeavceleb":
+        train_dataset = FakeAVDataset("train", frame_num=args.frame_num, classifier_type=args.classifier_type)
+        test_dataset = FakeAVDataset("test", frame_num=args.frame_num, classifier_type=args.classifier_type)
+    elif args.dataset == "swan":
+        train_dataset = SwanDataset("train")
+        test_dataset = SwanDataset("test3")
 
     train_dataloader = DataLoader(
-        train_dataset, batch_size=128, shuffle=False, num_workers=8, pin_memory=True
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
     )
     test_dataloader = DataLoader(
-        test_dataset, batch_size=128, shuffle=True, num_workers=8, pin_memory=True
+        test_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True
     )
-    # data shape
-    # [64, 1, 40, 750]
+    save_dir = "weights"
+    # set model
+    if args.classifier_type == "A":
+        model = ASTModel(label_dim=2, input_fdim=26, input_tdim=args.frame_num * 4).to(args.device)
+        args.enc_dim = 768
+        save_dir += "/ast"
+    elif args.classifier_type == "V":
+        model = ViViT(image_size=224, patch_size=16, num_classes=2, num_frames=args.frame_num).to(args.device)
+        args.enc_dim = 192
+        save_dir += "/vivit"
+    else:
+        # model = AVModel(pretrained=False, device=args.device)
+        pass
+    if WAB:
+        run = wandb.init(
+            project=args.classifier_type,
+            config={
+                "add_loss": args.add_loss,
+                "lr": args.lr,
+                "batch_size": args.batch_size,
+                "frame_num": args.frame_num,
+                "classifier_type": args.classifier_type,
+            },
+        )
 
     criterion = nn.CrossEntropyLoss()
 
-    # set ocsoftmax function
-    ocsoftmax = OCSoftmax(feat_dim=256).to(device)
-    ocsoftmax.train()
-    ocsoftmax_optimzer = torch.optim.SGD(ocsoftmax.parameters(), lr=lr)
-    ocsoftmax_scheduler = CosineAnnealingLR(ocsoftmax_optimzer, T_max=epochs, eta_min=0.00001)
+    # set softmax
+    if args.add_loss == "ocsoftmax":
+        print("init ocsoftmax")
+        ocsoftmax = OCSoftmax(args.enc_dim, r_real=args.r_real, r_fake=args.r_fake, alpha=args.alpha).to(
+            args.device
+        )
+        ocsoftmax.train()
+        ocsoftmax_optimzer = torch.optim.SGD(ocsoftmax.parameters(), lr=args.lr)
+        save_dir += "/ocsoftmax"
+    elif args.add_loss == "softmax":
+        print("init softmax")
+        criterion = nn.CrossEntropyLoss()
+        save_dir += "/softmax"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
-    lfcc_model = ResNet(3, enc_dim, resnet_type="18", nclasses=2).to(device)
-    lfcc_model = nn.DataParallel(lfcc_model, device_ids=devices)
-
-    lfcc_optimizer = torch.optim.AdamW(lfcc_model.parameters(), lr=lr, weight_decay=0.0005)
-    lfcc_scheduler = CosineAnnealingLR(lfcc_optimizer, T_max=epochs, eta_min=0.00001)
-
-    logging.basicConfig(
-        filename="training_log.log",
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s:%(message)s",
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=args.lr, betas=(args.beta_1, args.beta_2), eps=args.eps, weight_decay=0.0005
     )
 
-    for epoch in range(epochs):
-        lfcc_model.train()
-        total_loss = 0
+    for epoch in range(args.epochs):
+        model.train()
+        train_loss = 0
         train_correct = 0
         train_total = 0
-        train_idx_loader, train_features_loader, train_scores = [], [], []
-        for data, labels in tqdm(train_dataloader):
-            data = data.to(device)
-            labels = labels.to(device)
+        # train_idx_loader, train_features_loader, train_scores = [], [], []
+        adjust_learning_rate(args, optimizer, epoch)
+        if args.add_loss == "ocsoftmax":
+            adjust_learning_rate(args, ocsoftmax_optimzer, epoch)
 
-            feats, outputs = lfcc_model(data)
-            train_correct += (outputs.argmax(1) == labels).sum().item()
+        for idx, (data) in tqdm(enumerate(train_dataloader)):
+            # get output
+            labels = data[-1]
+            labels = labels.to(args.device)
+            outputs, feats = get_outputs_feats(model, data, args)
+
+            # compute loss and backprop
+            if args.add_loss == "ocsoftmax":
+                loss, scores = ocsoftmax(feats, labels)
+                outputs = (scores > 0).float()
+                train_correct += (outputs == labels).sum().item()
+
+                optimizer.zero_grad()
+                ocsoftmax_optimzer.zero_grad()
+
+                loss.backward()
+                ocsoftmax_optimzer.step()
+                optimizer.step()
+
+            elif args.add_loss == "softmax":
+                train_correct += (outputs.argmax(1) == labels).sum().item()
+                optimizer.zero_grad()
+                loss = criterion(outputs, labels)
+                loss.backward()
+                optimizer.step()
             train_total += labels.size(0)
 
-            # lfcc_loss = criterion(outputs, labels)
+            train_loss += loss.item()
 
-            # oc softmax
-            ocsoftmaxloss, scores = ocsoftmax(feats, labels)
-            lfcc_loss = ocsoftmaxloss
-            ocsoftmax_optimzer.zero_grad()
-            lfcc_optimizer.zero_grad()
-            lfcc_loss.backward()
-            lfcc_optimizer.step()
-            ocsoftmax_optimzer.step()
-            total_loss += lfcc_loss.item()
+        train_acc = round(train_correct * 100 / train_total, 2)
 
-            train_features_loader.append(feats)
-            train_idx_loader.append(labels)
-            train_scores.append(scores)
-        # plot pca for train
-        train_features = torch.cat(train_features_loader, dim=0).data.cpu().numpy()
-        train_labels = torch.cat(train_idx_loader, 0).data.cpu().numpy()
-        plot_pca(features=train_features, labels=train_labels, dataset_type="train", epoch=epoch)
-
-        train_scores = torch.cat(train_scores, 0).data.cpu().numpy()
-        train_eer = em.compute_eer(
-            train_scores[train_labels == 0], train_scores[train_labels == 1]
-        )[0]
-
-        lfcc_model.eval()
+        model.eval()
         with torch.no_grad():
-            correct = 0
-            total = 0
-            idx_loader, score_loader, features_loader = [], [], []
+            val_correct = 0
+            val_total = 0
 
-            for data, labels in test_dataloader:
-                data = data.to(device)
-                labels = labels.to(device)
+            for idx, (data) in tqdm(enumerate(test_dataloader)):
+                labels = data[-1].to(args.device)
+                outputs, feats = get_outputs_feats(model, data, args)
+                if args.add_loss == "ocsoftmax":
+                    ocsoftmaxloss, score = ocsoftmax(feats, labels)
+                    correct = (score > 0).float().eq(labels).sum().item()
 
-                feats, outputs = lfcc_model(data)
-                correct += (outputs.argmax(1) == labels).sum().item()
-                total += labels.size(0)
+                elif args.add_loss == "softmax":
+                    correct = (outputs.argmax(1) == labels).sum().item()
+                val_correct += correct
+                val_total += labels.size(0)
 
-                ocsoftmaxloss, score = ocsoftmax(feats, labels)
+        val_acc = round(val_correct * 100 / val_total, 2)
+        if WAB:
+            wandb.log(
+                {"train_loss": train_loss, "train_acc": train_acc, "val_acc": val_acc, "correct": val_correct}
+            )
+        print(f"Epoch {epoch}: train loss {train_loss}, train acc {train_acc}, val acc {val_acc}")
+        if prev_acc is None:
+            prev_acc = val_acc
+            torch.save(model, f"{save_dir}/model.pth")
+            if args.add_loss == "ocsoftmax":
+                torch.save(ocsoftmax, f"{save_dir}/ocsoftmax.pth")
 
-                features_loader.append(feats)
-                score_loader.append(score)
-                idx_loader.append(labels)
+        elif val_acc > prev_acc:
+            torch.save(model, f"{save_dir}/model.pth")
+            if args.add_loss == "ocsoftmax":
+                torch.save(ocsoftmax, f"{save_dir}/ocsoftmax.pth")
 
-        scores = torch.cat(score_loader, 0).data.cpu().numpy()
-        labels = torch.cat(idx_loader, 0).data.cpu().numpy()
-        features = torch.cat(features_loader, dim=0).data.cpu().numpy()
-
-        plot_pca(features=features, labels=labels, dataset_type="test", epoch=epoch)
-
-        val_eer = em.compute_eer(scores[labels == 0], scores[labels == 1])[0]
-
-        result = (
-            f"epoch: {epoch}, train_eer : {train_eer} , val_eer: {val_eer}, cnt : {early_stop_cnt}"
-        )
-        print(result)
-        logging.info(result)
-        if val_eer < prev_eer:
-            prev_eer = val_eer
-            torch.save(lfcc_model.state_dict(), f"{out_folder}/lfcc_model.pt")
-            torch.save(ocsoftmax.state_dict(), f"{out_folder}/ocsoftmax.pt")
+            prev_acc = val_acc
             early_stop_cnt = 0
         else:
             early_stop_cnt += 1
 
-        if early_stop_cnt == 10:
+        if early_stop_cnt == 20:
             break
-
-        lfcc_scheduler.step()
-        ocsoftmax_scheduler.step()
