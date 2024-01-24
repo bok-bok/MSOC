@@ -76,7 +76,7 @@ def adjust_learning_rate(args, optimizer, epoch_num):
 
 if __name__ == "__main__":
     args = get_args()
-    prev_acc = None
+    prev_loss = None
     WAB = True
     early_stop_cnt = 0
 
@@ -190,12 +190,13 @@ if __name__ == "__main__":
         with torch.no_grad():
             val_correct = 0
             val_total = 0
-
+            val_loss = 0
             for idx, (data) in tqdm(enumerate(test_dataloader)):
                 labels = data[-1].to(args.device)
                 outputs, feats = get_outputs_feats(model, data, args)
                 if args.add_loss == "ocsoftmax":
                     ocsoftmaxloss, score = ocsoftmax(feats, labels)
+                    val_loss += ocsoftmaxloss.item()
                     correct = (score > 0).float().eq(labels).sum().item()
 
                 elif args.add_loss == "softmax":
@@ -206,21 +207,27 @@ if __name__ == "__main__":
         val_acc = round(val_correct * 100 / val_total, 2)
         if WAB:
             wandb.log(
-                {"train_loss": train_loss, "train_acc": train_acc, "val_acc": val_acc, "correct": val_correct}
+                {
+                    "train_loss": train_loss,
+                    "train_acc": train_acc,
+                    "val_loss": val_loss,
+                    "val_acc": val_acc,
+                    "correct": val_correct,
+                }
             )
         print(f"Epoch {epoch}: train loss {train_loss}, train acc {train_acc}, val acc {val_acc}")
-        if prev_acc is None:
-            prev_acc = val_acc
+        if prev_loss is None:
+            prev_loss = val_loss
             torch.save(model, f"{save_dir}/model.pth")
             if args.add_loss == "ocsoftmax":
                 torch.save(ocsoftmax, f"{save_dir}/ocsoftmax.pth")
 
-        elif val_acc > prev_acc:
+        elif val_loss < prev_loss:
             torch.save(model, f"{save_dir}/model.pth")
             if args.add_loss == "ocsoftmax":
                 torch.save(ocsoftmax, f"{save_dir}/ocsoftmax.pth")
 
-            prev_acc = val_acc
+            prev_loss = val_loss
             early_stop_cnt = 0
         else:
             early_stop_cnt += 1
