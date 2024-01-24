@@ -10,6 +10,7 @@ import torch.nn.functional
 import torchaudio
 import torchvision.transforms as T
 from PIL import Image
+from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset
 
 src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
@@ -81,7 +82,7 @@ class FakeAVDataset(Dataset):
         # check input values
         if classifier_type not in ["V", "A", "AV", "ALL"]:
             raise ValueError("classifier_type should be one of V, A, AV")
-        if dataset_type not in ["train", "test"]:
+        if dataset_type not in ["train", "validation", "test"]:
             raise ValueError("dataset_type should be one of train, test")
 
         def get_labeled_df(classifier_type: str, df: pd.DataFrame):
@@ -101,12 +102,16 @@ class FakeAVDataset(Dataset):
         # set 70 sources for test
         self.test_source = self.df["source"].unique()[:70]
 
-        if dataset_type == "train":
-            self.df = self.df[~self.df["source"].isin(self.test_source)]
-        elif dataset_type == "test":
-            self.df = self.df[self.df["source"].isin(self.test_source)]
-
         self.df = get_labeled_df(classifier_type, self.df)
+        if dataset_type == "test":
+            self.df = self.df[self.df["source"].isin(self.test_source)]
+        else:
+            tmp_df = self.df[~self.df["source"].isin(self.test_source)]
+            train_df, val_df = train_test_split(tmp_df, test_size=0.2, stratify=tmp_df["label"])
+            if dataset_type == "train":
+                self.df = train_df
+            elif dataset_type == "val":
+                self.df = val_df
 
         # retrict dataset to 1000 samples
         # self.df = self.df[:100]
