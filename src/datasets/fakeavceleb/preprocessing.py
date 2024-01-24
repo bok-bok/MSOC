@@ -1,4 +1,5 @@
 import os
+import sys
 
 import cv2
 import moviepy.editor as mp
@@ -6,6 +7,9 @@ import pandas as pd
 import torch
 import torchaudio
 import torchaudio.transforms as T
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+from data.detect_landmark import preprocess_frames
 
 output_path = "/storage/neil/FakeAVCeleb_preprocessed"
 
@@ -39,6 +43,12 @@ def extract_all_frames(video_path, frames_dir):
         frame_count += 1
 
     cap.release()
+
+
+def extract_all_lips(base_path):
+    face_predictor_path = "models/preprocessing_model_weights/shape_predictor_68_face_landmarks.dat"
+    mean_face_path = "models/preprocessing_model_weights/20words_mean_face.npy"
+    preprocess_frames(base_path, face_predictor_path, mean_face_path)
 
 
 def extract_audio(video_path, audio_dir, sample_rate=16000):
@@ -76,9 +86,10 @@ for idx, row in df.iterrows():
     frames_dir = os.path.join(out_data_dir, "frames")
 
     # extract frames and audio
-    extract_all_frames(data_dir, frames_dir)
-    extract_audio(data_dir, out_data_dir)
-
+    # extract_all_frames(data_dir, frames_dir)
+    # extract_audio(data_dir, out_data_dir)
+    # extract lips
+    extract_all_lips(out_data_dir)
 # create preprocessed_directory column
 df["preprocessed_directory"] = preprocessed_data_directories
 
