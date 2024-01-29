@@ -17,7 +17,6 @@ src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
 
 sys.path.append(src_path)
 sys.path.append(os.path.join(src_path, "models/av_hubert/avhubert"))
-# sys.path.append(os.path.join(src_path, "models/av_hubert"))
 
 import logging
 
@@ -43,8 +42,8 @@ class FakeAVDataset(Dataset):
         classifier_type,
     ):
         # load data
+        self.seed = 42
         self._load_data(classifier_type, dataset_type)
-
         self.classifier_type = classifier_type
         # set target frame number
         self.video_target_frames = frame_num
@@ -80,34 +79,56 @@ class FakeAVDataset(Dataset):
         """
 
         # check input values
-        if classifier_type not in ["V", "A", "AV", "ALL"]:
+        if classifier_type not in ["V", "A", "AV", "ALL", "BOTH"]:
             raise ValueError("classifier_type should be one of V, A, AV")
-        if dataset_type not in ["train", "validation", "test"]:
+        if dataset_type not in ["train", "val", "test", "test1", "test2"]:
             raise ValueError("dataset_type should be one of train, test")
 
         def get_labeled_df(classifier_type: str, df: pd.DataFrame):
+            df = df.copy()
             if classifier_type == "V":
                 fakeset = ["FakeVideo-RealAudio", "FakeVideo-FakeAudio"]
             elif classifier_type == "A":
                 fakeset = ["RealVideo-FakeAudio", "FakeVideo-FakeAudio"]
-            elif classifier_type == "AV":
+                # remove added data - remove row contains nan
+                df = df[df["target1"].notna()]
+
+            elif classifier_type == "AV" or classifier_type == "BOTH":
                 fakeset = ["FakeVideo-RealAudio", "RealVideo-FakeAudio", "FakeVideo-FakeAudio"]
 
             df["label"] = df["type"].apply(lambda x: FAKE if x in fakeset else ORIGINAL)
             return df
 
-        self.csv_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "data.csv")
+        def change_dir(df):
+            def change_dir_helper(row):
+                # change /neil/storage ... to /data/kyungbok
+                # write code here
+                cur_dir = row["preprocessed_directory"]
+                new_dir = cur_dir.replace("storage/neil", "/data/kyungbok")
+                return new_dir
+
+            df["preprocessed_directory"] = df.apply(change_dir_helper, axis=1)
+            return df
+
+        self.csv_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "added_data.csv")
         self.df = pd.read_csv(self.csv_path)
+        # self.df = change_dir(self.df)
 
         # set 70 sources for test
         self.test_source = self.df["source"].unique()[:70]
 
         self.df = get_labeled_df(classifier_type, self.df)
-        if dataset_type == "test":
-            self.df = self.df[self.df["source"].isin(self.test_source)]
+        if "test" in dataset_type:
+            if dataset_type == "test":
+                self.df = self.df[self.df["source"].isin(self.test_source)]
+            else:
+                self.df = self.create_test_dataset(dataset_type)
+
         else:
             tmp_df = self.df[~self.df["source"].isin(self.test_source)]
-            train_df, val_df = train_test_split(tmp_df, test_size=0.2, stratify=tmp_df["label"])
+            train_df, val_df = train_test_split(
+                tmp_df, test_size=0.2, stratify=tmp_df["label"], random_state=self.seed
+            )
             if dataset_type == "train":
                 self.df = train_df
             elif dataset_type == "val":
@@ -124,6 +145,63 @@ class FakeAVDataset(Dataset):
         print(f"fake: {fake_count}, real: {real_count}")
 
         # set label based on classifier type
+
+    def create_test_dataset(self, test_type: str):
+        df = self.df[self.df["source"].isin(self.test_source)]
+        # Create a method balanced dataset
+        if test_type == "test1":
+            total_sample_size = 70
+            methods = list(df["method"].unique())
+            methods.remove("real")
+
+            num_methods = len(methods)
+            # Step 2: Calculate sample size per method
+            sample_size_per_method = total_sample_size // num_methods
+
+            # Step 3: Handle the remainder
+            remainder = total_sample_size % num_methods
+
+            real = df[df["method"] == "real"]
+
+            # Step 4: Sample from each method group
+            samples = []
+            for method in methods:
+                method_sample_size = sample_size_per_method + (1 if remainder > 0 else 0)
+                remainder -= 1
+                method_samples = df[df["method"] == method].sample(
+                    n=method_sample_size, replace=False, random_state=self.seed
+                )
+                samples.append(method_samples)
+
+            # add real samples
+            samples.append(real)
+            # Step 5: Combine the samples
+            method_balanced_df = pd.concat(samples)
+            return method_balanced_df
+
+        elif test_type == "test2":
+            total_sample_size = 70
+            categories = list(df["type"].unique())
+            categories.remove("RealVideo-RealAudio")
+
+            sample_size_per_category = total_sample_size // len(categories)
+            # Step 3: Handle the remainder
+            remainder = total_sample_size % len(categories)
+            real = df[df["method"] == "real"]
+
+            samples = []
+            for category in categories:
+                category_sample_size = sample_size_per_category + (1 if remainder > 0 else 0)
+                remainder -= 1
+
+                category_samples = df[df["type"] == category].sample(
+                    n=category_sample_size, replace=False, random_state=self.seed
+                )
+                samples.append(category_samples)
+            samples.append(real)
+            # Step 5: Combine the samples
+            test_2_df = pd.concat(samples)
+            return test_2_df
 
     def stacker(self, feats, stack_order):
         """
@@ -147,10 +225,11 @@ class FakeAVDataset(Dataset):
 
         # get label
         category = row["category"]
-        if category == "A":
-            label = ORIGINAL
-        else:
-            label = FAKE
+        # if category == "A":
+        #     label = ORIGINAL
+        # else:
+        #     label = FAKE
+        label = row["label"]
 
         directory = row["preprocessed_directory"]
         if self.classifier_type == "V":
@@ -166,6 +245,10 @@ class FakeAVDataset(Dataset):
         elif self.classifier_type == "A":
             spectrogram = self._load_audio(directory)
             return spectrogram, label
+        elif self.classifier_type == "BOTH":
+            frames = self._load_frames(directory)
+            spectrogram = self._load_audio(directory)
+            return frames, spectrogram, label
         elif self.classifier_type == "ALL":
             frames = self._load_frames(directory)
             lip_frames = self._load_lip_frames(directory)
@@ -282,141 +365,6 @@ class FakeAVDataset(Dataset):
 
     def __len__(self):
         return len(self.df)
-
-
-def preemphasis(signal, coeff=0.97):
-    """perform preemphasis on the input signal.
-
-    :param signal: The signal to filter.
-    :param coeff: The preemphasis coefficient. 0 is none, default 0.97.
-    :returns: the filtered signal.
-    """
-    return np.append(signal[0], signal[1:] - coeff * signal[:-1])
-
-
-class AudiosetDataset(Dataset):
-    def __init__(self, dataset_json_file, label_csv=None):
-        """
-        Dataset that manages audio recordings
-        :param audio_conf: Dictionary containing the audio loading and preprocessing settings
-        :param dataset_json_file
-        """
-        self.datapath = dataset_json_file
-        with open(dataset_json_file, "r") as fp:
-            data_json = json.load(fp)
-
-        self.data = data_json["data"]
-
-        audio_conf = {
-            "num_mel_bins": 128,
-            "target_length": 1024,
-            "freqm": 0,
-            "timem": 0,
-            "mode": "train",
-            "mean": 4.2677393,
-            "std": 4.5689974,
-            "noise": False,
-        }
-        # val_audio_conf = {'num_mel_bins': 128, 'target_length': args.audio_length, 'freqm': 0, 'timem': 0, 'mixup': 0, 'dataset': args.dataset, 'mode':'evaluation', 'mean':args.dataset_mean, 'std':args.dataset_std, 'noise':False}
-
-        self.audio_conf = {
-            "num_mel_bins": 80,
-        }
-        print("---------------the {:s} dataloader---------------".format(self.audio_conf.get("mode")))
-        self.melbins = self.audio_conf.get("num_mel_bins")
-        self.freqm = self.audio_conf.get("freqm")
-        self.timem = self.audio_conf.get("timem")
-        print(
-            "now using following mask: {:d} freq, {:d} time".format(
-                self.audio_conf.get("freqm"), self.audio_conf.get("timem")
-            )
-        )
-        # dataset spectrogram mean and std, used to normalize the input
-        self.norm_mean = self.audio_conf.get("mean")
-        self.norm_std = self.audio_conf.get("std")
-        # if add noise for data augmentation
-        self.noise = self.audio_conf.get("noise")
-        if self.noise == True:
-            print("now use noise augmentation")
-
-        # self.index_dict = make_index_dict(label_csv)
-
-        self.mel_spectrogram_transform = T.MelSpectrogram(
-            sample_rate=16000,
-            n_fft=512,
-            win_length=int(16000 * 0.025),
-            hop_length=int(16000 * 0.01),
-            center=False,
-            n_mels=80,
-        )
-
-    def _wav2fbank(self, filename):
-        waveform, sr = torchaudio.load(filename)
-        waveform = waveform - waveform.mean()
-
-        target_length = self.audio_conf.get("target_length")
-        n_frames = fbank.shape[0]
-
-        p = target_length - n_frames
-
-        # cut and pad
-        if p > 0:
-            m = torch.nn.ZeroPad2d((0, 0, 0, p))
-            fbank = m(fbank)
-        elif p < 0:
-            fbank = fbank[0:target_length, :]
-
-        return fbank
-
-    def __getitem__(self, index):
-        """
-        returns: image, audio, nframes
-        where image is a FloatTensor of size (3, H, W)
-        audio is a FloatTensor of size (N_freq, N_frames) for spectrogram, or (N_frames) for waveform
-        nframes is an integer
-        """
-        # do mix-up for this sample (controlled by the given mixup rate)
-        datum = self.data[index]
-        label_indices = np.zeros(self.label_num)
-        fbank, mix_lambda = self._wav2fbank(datum["wav"])
-
-        for label_str in datum["labels"].split(","):
-            label_indices[int(self.index_dict[label_str])] = 1.0
-
-        label_indices = torch.FloatTensor(label_indices)
-
-        # SpecAug, not do for eval set
-        freqm = torchaudio.transforms.FrequencyMasking(self.freqm)
-        timem = torchaudio.transforms.TimeMasking(self.timem)
-        fbank = torch.transpose(fbank, 0, 1)
-        # this is just to satisfy new torchaudio version, which only accept [1, freq, time]
-        fbank = fbank.unsqueeze(0)
-        if self.freqm != 0:
-            fbank = freqm(fbank)
-        if self.timem != 0:
-            fbank = timem(fbank)
-        # squeeze it back, it is just a trick to satisfy new torchaudio version
-        fbank = fbank.squeeze(0)
-        fbank = torch.transpose(fbank, 0, 1)
-
-        # normalize the input for both training and test
-        if not self.skip_norm:
-            fbank = (fbank - self.norm_mean) / (self.norm_std * 2)
-        # skip normalization the input if you are trying to get the normalization stats.
-        else:
-            pass
-
-        if self.noise == True:
-            fbank = fbank + torch.rand(fbank.shape[0], fbank.shape[1]) * np.random.rand() / 10
-            fbank = torch.roll(fbank, np.random.randint(-10, 10), 0)
-
-        mix_ratio = min(mix_lambda, 1 - mix_lambda) / max(mix_lambda, 1 - mix_lambda)
-
-        # the output fbank shape is [time_frame_num, frequency_bins], e.g., [1024, 128]
-        return fbank, label_indices
-
-    def __len__(self):
-        return len(self.data)
 
 
 if __name__ == "__main__":
