@@ -110,7 +110,7 @@ class FakeAVDataset(Dataset):
             df["preprocessed_directory"] = df.apply(change_dir_helper, axis=1)
             return df
 
-        self.csv_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "added_data.csv")
+        self.csv_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "data.csv")
         self.df = pd.read_csv(self.csv_path)
         # self.df = change_dir(self.df)
 
