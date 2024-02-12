@@ -8,6 +8,7 @@ import pandas as pd
 import torch
 import torch.nn.functional
 import torchaudio
+import torchaudio.transforms as A_T
 import torchvision.transforms as T
 from PIL import Image
 from sklearn.model_selection import train_test_split
@@ -42,8 +43,10 @@ class FakeAVDataset(Dataset):
         classifier_type,
     ):
         # load data
-        self._load_data(classifier_type, dataset_type)
+        self.seed = 42
+        self.dataset_type = dataset_type
 
+        self._load_data(classifier_type, dataset_type)
         self.classifier_type = classifier_type
         # set target frame number
         self.video_target_frames = frame_num
@@ -70,6 +73,9 @@ class FakeAVDataset(Dataset):
             ]
         )
 
+    def get_df(self):
+        return self.df
+
     def _load_data(self, classifier_type: str, dataset_type: str):
         """
         Load and preprocess data from csv file
@@ -81,19 +87,24 @@ class FakeAVDataset(Dataset):
         # check input values
         if classifier_type not in ["V", "A", "AV", "ALL", "BOTH"]:
             raise ValueError("classifier_type should be one of V, A, AV")
-        if dataset_type not in ["train", "validation", "test"]:
+        if dataset_type not in ["train", "val", "test", "test1", "test2"]:
             raise ValueError("dataset_type should be one of train, test")
 
         def get_labeled_df(classifier_type: str, df: pd.DataFrame):
+            df = df.copy()
             if classifier_type == "V":
                 fakeset = ["FakeVideo-RealAudio", "FakeVideo-FakeAudio"]
             elif classifier_type == "A":
                 fakeset = ["RealVideo-FakeAudio", "FakeVideo-FakeAudio"]
+                # remove added data - remove row contains nan
+                df = df[df["target1"].notna()]
+
             elif classifier_type == "AV" or classifier_type == "BOTH":
                 fakeset = ["FakeVideo-RealAudio", "RealVideo-FakeAudio", "FakeVideo-FakeAudio"]
 
             df["label"] = df["type"].apply(lambda x: FAKE if x in fakeset else ORIGINAL)
             return df
+
         def change_dir(df):
             def change_dir_helper(row):
                 # change /neil/storage ... to /data/kyungbok
@@ -102,27 +113,34 @@ class FakeAVDataset(Dataset):
                 new_dir = cur_dir.replace("storage/neil", "/data/kyungbok")
                 return new_dir
 
-
             df["preprocessed_directory"] = df.apply(change_dir_helper, axis=1)
             return df
 
-        self.csv_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "data.csv")
+        self.csv_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "final_data.csv")
         self.df = pd.read_csv(self.csv_path)
         self.df = change_dir(self.df)
 
         # set 70 sources for test
         self.test_source = self.df["source"].unique()[:70]
-
+        self.val_source = self.df["source"].unique()[70:140]
         self.df = get_labeled_df(classifier_type, self.df)
-        if dataset_type == "test":
-            self.df = self.df[self.df["source"].isin(self.test_source)]
+        if "test" in dataset_type:
+            if dataset_type == "test":
+                self.df = self.df[self.df["source"].isin(self.test_source)]
+            else:
+                self.df = self.create_test_dataset(dataset_type)
+
         else:
             tmp_df = self.df[~self.df["source"].isin(self.test_source)]
-            train_df, val_df = train_test_split(tmp_df, test_size=0.2, stratify=tmp_df["label"])
+            # train_df, val_df = train_test_split(
+            #     tmp_df, test_size=0.2, stratify=tmp_df["label"], random_state=self.seed
+            # )
             if dataset_type == "train":
-                self.df = train_df
+                self.df = tmp_df[~tmp_df["source"].isin(self.val_source)]
+                # self.df = train_df
             elif dataset_type == "val":
-                self.df = val_df
+                self.df = tmp_df[tmp_df["source"].isin(self.val_source)]
+                # self.df = val_df
 
         # retrict dataset to 1000 samples
         # self.df = self.df[:100]
@@ -135,6 +153,63 @@ class FakeAVDataset(Dataset):
         print(f"fake: {fake_count}, real: {real_count}")
 
         # set label based on classifier type
+
+    def create_test_dataset(self, test_type: str):
+        df = self.df[self.df["source"].isin(self.test_source)]
+        # Create a method balanced dataset
+        if test_type == "test1":
+            total_sample_size = 70
+            methods = list(df["method"].unique())
+            methods.remove("real")
+
+            num_methods = len(methods)
+            # Step 2: Calculate sample size per method
+            sample_size_per_method = total_sample_size // num_methods
+
+            # Step 3: Handle the remainder
+            remainder = total_sample_size % num_methods
+
+            real = df[df["method"] == "real"]
+
+            # Step 4: Sample from each method group
+            samples = []
+            for method in methods:
+                method_sample_size = sample_size_per_method + (1 if remainder > 0 else 0)
+                remainder -= 1
+                method_samples = df[df["method"] == method].sample(
+                    n=method_sample_size, replace=False, random_state=self.seed
+                )
+                samples.append(method_samples)
+
+            # add real samples
+            samples.append(real)
+            # Step 5: Combine the samples
+            method_balanced_df = pd.concat(samples)
+            return method_balanced_df
+
+        elif test_type == "test2":
+            total_sample_size = 70
+            categories = list(df["type"].unique())
+            categories.remove("RealVideo-RealAudio")
+
+            sample_size_per_category = total_sample_size // len(categories)
+            # Step 3: Handle the remainder
+            remainder = total_sample_size % len(categories)
+            real = df[df["method"] == "real"]
+
+            samples = []
+            for category in categories:
+                category_sample_size = sample_size_per_category + (1 if remainder > 0 else 0)
+                remainder -= 1
+
+                category_samples = df[df["type"] == category].sample(
+                    n=category_sample_size, replace=False, random_state=self.seed
+                )
+                samples.append(category_samples)
+            samples.append(real)
+            # Step 5: Combine the samples
+            test_2_df = pd.concat(samples)
+            return test_2_df
 
     def stacker(self, feats, stack_order):
         """
@@ -157,7 +232,7 @@ class FakeAVDataset(Dataset):
         row = self.df.iloc[index]
 
         # get label
-        category = row["category"]
+        # category = row["category"]
         # if category == "A":
         #     label = ORIGINAL
         # else:
@@ -273,6 +348,10 @@ class FakeAVDataset(Dataset):
         waveform, sr = torchaudio.load(audio_dir)
         waveform = waveform - waveform.mean()
 
+        # apply random augmentation
+        if self.dataset_type == "train":
+            waveform = add_noise(waveform)
+
         mel_spectrogram = self.mel_spectrogram_transform(waveform[0])
 
         # pad or truncate to target length
@@ -299,6 +378,12 @@ class FakeAVDataset(Dataset):
     def __len__(self):
         return len(self.df)
 
+
+def add_noise(audio, min_noise_level=0.005, max_noise_level=0.05):
+    noise_level = random.uniform(min_noise_level, max_noise_level)
+    noise = torch.randn(audio.shape) * noise_level
+    noisy_audio = audio + noise
+    return noisy_audio
 
 
 if __name__ == "__main__":
