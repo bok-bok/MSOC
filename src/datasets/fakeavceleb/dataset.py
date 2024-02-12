@@ -118,7 +118,7 @@ class FakeAVDataset(Dataset):
 
         self.csv_path = os.path.join(os.path.abspath(os.path.dirname(__file__)), "final_data.csv")
         self.df = pd.read_csv(self.csv_path)
-        self.df = change_dir(self.df)
+        # self.df = change_dir(self.df)
 
         # set 70 sources for test
         self.test_source = self.df["source"].unique()[:70]
