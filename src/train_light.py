@@ -11,7 +11,9 @@ from lightning import Callback, LightningModule, Trainer, seed_everything
 from pytorch_lightning import Callback, LightningModule, Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from pytorch_lightning.loggers import TensorBoardLogger
+
+# from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
+from pytorch_lightning.loggers import WandbLogger
 
 import wandb
 
@@ -172,8 +174,9 @@ if __name__ == "__main__":
     }
 
     if args.wandb:
-        log_name = f"original_dataset_{args.loss_type}"
-        wandb.init(project="margin", name=args.log_name)
+        log_name = f"subject_dataset_{args.loss_type}_all_frames"
+        wandb_logger = WandbLogger(project="Margin_light", name=log_name, log_model="all")
+        # wandb.init(project="margin", name=args.log_name)
 
     for train_fold in [""]:
         # for train_fold in ['train_5.txt', 'train_1.txt']:
@@ -215,7 +218,7 @@ if __name__ == "__main__":
         else:
             log_name = f"original_dataset_{args.loss_type}_maxframes:{args.max_frames}"
 
-        board_logger = TensorBoardLogger("logs", name=log_name)
+        # board_logger = TensorBoardLogger("logs", name=log_name)
 
         trainer = Trainer(
             log_every_n_steps=args.log_steps,
@@ -242,7 +245,7 @@ if __name__ == "__main__":
             devices=args.gpus,
             strategy=None if args.gpus < 2 else "ddp",
             resume_from_checkpoint=args.resume,
-            logger=board_logger,
+            logger=wandb_logger,
         )
 
         # print(args.learning_rate, args.weight_decay, args.margin_audio, args.margin_visual, args.margin_contrast)
