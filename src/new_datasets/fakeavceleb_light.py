@@ -247,11 +247,25 @@ class FakeavcelebDataModule(LightningDataModule):
         #     if "id" in train_line:
         #         train_ids.append(train_line)
         # train_f.close()
-        sources = self.metadata["source"].unique()
-        train_ids = sources[:400]
+        method_column_mapping = {
+            "wav2lip": "source",
+            "rtvc": "source",
+            "faceswap": "target1",
+            "fsgan": "target1",
+            "faceswap-wav2lip": "target1",
+            "fsgan-wav2lip": "target1",
+            "real": "source",
+        }
+        self.metadata["subject"] = self.metadata.apply(
+            lambda row: row[method_column_mapping[row["method"]]], axis=1
+        )
+        subjects = self.metadata["source"].unique()
+        train_ids = subjects[:400]
 
-        train_metadata = self.metadata[self.metadata["source"].isin(train_ids)]
-        test_metadata = self.metadata[~self.metadata["source"].isin(train_ids)]
+        # train_metadata = self.metadata[self.metadata["source"].isin(train_ids)]
+        # test_metadata = self.metadata[~self.metadata["source"].isin(train_ids)]
+        train_metadata = self.metadata[self.metadata["subject"].isin(train_ids)]
+        test_metadata = self.metadata[~self.metadata["subject"].isin(train_ids)]
         train_count = 400
         test_count = 100
         train_metadata_A = train_metadata[train_metadata["category"].isin(["A"])][:train_count]
