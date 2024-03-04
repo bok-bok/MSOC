@@ -83,8 +83,11 @@ class MRDF_Margin_OC(LightningModule):
         )
 
         # if margin_contrast is -1 then no contrastive loss
+        self.margin_contrast = margin_contrast
         if margin_contrast != -1:
             self.contrast_loss = ContrastLoss(loss_fn=nn.CosineSimilarity(dim=-1), margin=margin_contrast)
+        else:
+            print("No contrastive loss")
         self.loss_audio = OCSoftmax(feat_dim=768, alpha=20).to("cuda")
         self.loss_video = OCSoftmax(feat_dim=768, alpha=20).to("cuda")
         self.mm_cls = CrossEntropyLoss()
@@ -141,7 +144,7 @@ class MRDF_Margin_OC(LightningModule):
 
         mm_loss = self.mm_cls(m_logits, m_label)
 
-        if self.contrast_loss != -1:
+        if self.margin_contrast != -1:
             contrast_loss = self.contrast_loss(v_feats, a_feats, c_label)
             loss = mm_loss + a_loss + v_loss + contrast_loss
         else:
@@ -274,14 +277,14 @@ class MRDF_Margin_OC(LightningModule):
 
     def validation_step_end(self, validation_step_outputs):
         # others: common, ensemble, multi-label
-        scores = validation_step_outputs["scores"]
+        # scores = validation_step_outputs["scores"]
 
         val_acc = self.acc(validation_step_outputs["preds"], validation_step_outputs["targets"]).item()
         val_auroc = self.auroc(validation_step_outputs["preds"], validation_step_outputs["targets"]).item()
         targets = validation_step_outputs["targets"].cpu().numpy()
-        val_eer = compute_eer(scores[targets == 1], scores[targets == 0])[0]
+        # val_eer = compute_eer(scores[targets == 1], scores[targets == 0])[0]
 
-        self.log("val_eer", val_eer, prog_bar=True, batch_size=self.batch_size)
+        # self.log("val_eer", val_eer, prog_bar=True, batch_size=self.batch_size)
         self.log("val_re", val_acc + val_auroc, prog_bar=True, batch_size=self.batch_size)
         self.log("val_acc", val_acc, prog_bar=True, batch_size=self.batch_size)
         self.log("val_auroc", val_auroc, prog_bar=True, batch_size=self.batch_size)
@@ -302,8 +305,16 @@ class MRDF_Margin_OC(LightningModule):
         valid_loss = Average([i["loss"] for i in validation_step_outputs]).item()
         preds = [item for list in validation_step_outputs for item in list["preds"]]
         targets = [item for list in validation_step_outputs for item in list["targets"]]
+        scores = [item for list in validation_step_outputs for item in list["scores"]]
+
         preds = torch.stack(preds, dim=0)
         targets = torch.stack(targets, dim=0)
+
+        scores = np.stack(scores, axis=0)
+        numpy_targets = targets.cpu().numpy()
+        val_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])[0]
+
+        self.log("val_eer", val_eer, batch_size=self.batch_size)
 
         # if valid_loss <= self.best_loss:
         self.best_acc = self.acc(preds, targets).item()

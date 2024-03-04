@@ -16,6 +16,7 @@ import fairseq
 import models.avhubert.hubert as hubert
 import models.avhubert.hubert_pretraining as hubert_pretraining
 import wandb
+from eval_metrics import compute_eer
 from fairseq.data.dictionary import Dictionary
 from fairseq.modules import LayerNorm
 from loss import ContrastLoss, LossComputer, MarginLoss, OCSoftmax
@@ -213,9 +214,10 @@ class MRDF_Margin(LightningModule):
             batch["c_label"],
             batch["m_label"],
         )
-
         # common and multi-class
-        preds = torch.argmax(self.softmax(m_logits), dim=1)
+        scores = self.softmax(m_logits)
+        preds = torch.argmax(scores, dim=1)
+        scores = scores[:, 1].data.cpu().numpy()
 
         self.log_dict(
             {f"val_{k}": v for k, v in loss_dict.items()},
@@ -226,7 +228,12 @@ class MRDF_Margin(LightningModule):
             batch_size=self.batch_size,
         )
 
-        return {"loss": loss_dict["mm_loss"], "preds": preds.detach(), "targets": batch["m_label"].detach()}
+        return {
+            "loss": loss_dict["mm_loss"],
+            "preds": preds.detach(),
+            "targets": batch["m_label"].detach(),
+            "scores": scores,
+        }
 
     def test_step(
         self,
@@ -252,9 +259,16 @@ class MRDF_Margin(LightningModule):
         )
 
         # common and multi-class
-        preds = torch.argmax(self.softmax(m_logits), dim=1)
+        scores = self.softmax(m_logits)
+        preds = torch.argmax(scores, dim=1)
+        scores = scores[:, 1].data.cpu().numpy()
 
-        return {"loss": loss_dict["mm_loss"], "preds": preds.detach(), "targets": batch["m_label"].detach()}
+        return {
+            "loss": loss_dict["mm_loss"],
+            "preds": preds.detach(),
+            "targets": batch["m_label"].detach(),
+            "scores": scores,
+        }
 
     def training_step_end(self, training_step_outputs):
         # others: common, ensemble, multi-label
@@ -289,8 +303,14 @@ class MRDF_Margin(LightningModule):
         valid_loss = Average([i["loss"] for i in validation_step_outputs]).item()
         preds = [item for list in validation_step_outputs for item in list["preds"]]
         targets = [item for list in validation_step_outputs for item in list["targets"]]
+        scores = [item for list in validation_step_outputs for item in list["scores"]]
+
         preds = torch.stack(preds, dim=0)
         targets = torch.stack(targets, dim=0)
+
+        scores = np.stack(scores, axis=0)
+        numpy_targets = targets.cpu().numpy()
+        val_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])[0]
 
         # if valid_loss <= self.best_loss:
         self.best_acc = self.acc(preds, targets).item()
@@ -302,6 +322,8 @@ class MRDF_Margin(LightningModule):
         self.best_fake_f1score = self.f1score(Opposite(preds), Opposite(targets)).item()
         self.best_fake_recall = self.recall(Opposite(preds), Opposite(targets)).item()
         self.best_fake_precision = self.precisions(Opposite(preds), Opposite(targets)).item()
+
+        self.log("val_eer", val_eer, batch_size=self.batch_size)
 
         self.best_loss = valid_loss
         print(
@@ -329,9 +351,15 @@ class MRDF_Margin(LightningModule):
         test_loss = Average([i["loss"] for i in test_step_outputs]).item()
         preds = [item for list in test_step_outputs for item in list["preds"]]
         targets = [item for list in test_step_outputs for item in list["targets"]]
+        scores = [item for list in test_step_outputs for item in list["scores"]]
 
         preds = torch.stack(preds, dim=0)
         targets = torch.stack(targets, dim=0)
+        # scores = torch.stack(scores, dim=0)
+        # scores is numpy
+        scores = np.stack(scores, axis=0)
+        numpy_targets = targets.cpu().numpy()
+        test_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])[0]
 
         test_acc = self.acc(preds, targets).item()
         test_auroc = self.auroc(preds, targets).item()
@@ -343,6 +371,7 @@ class MRDF_Margin(LightningModule):
         test_fake_recall = self.recall(Opposite(preds), Opposite(targets)).item()
         test_fake_precision = self.precisions(Opposite(preds), Opposite(targets)).item()
 
+        self.log("test_eer", test_eer, batch_size=self.batch_size)
         self.log("test_acc", test_acc, batch_size=self.batch_size)
         self.log("test_auroc", test_auroc, batch_size=self.batch_size)
         self.log("test_real_f1score", test_real_f1score, batch_size=self.batch_size)
