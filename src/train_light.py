@@ -7,7 +7,6 @@ import time
 
 import numpy as np
 import torch
-from lightning import Callback, LightningModule, Trainer, seed_everything
 from pytorch_lightning import Callback, LightningModule, Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
@@ -19,9 +18,12 @@ import wandb
 
 # from dataset.dfdc import DFDCDataModule
 from models.mrdf_margin import MRDF_Margin
+from models.mrdf_margin_oc import MRDF_Margin_OC
+from new_datasets.fakeavceleb_light import Fakeavceleb, FakeavcelebDataModule
 
 # from dataset.fakeavceleb import FakeavcelebDataModule
-from new_datasets.fakeavceleb_light import Fakeavceleb, FakeavcelebDataModule
+# from new_datasets.fakeavceleb_light import Fakeavceleb, FakeavcelebDataModule
+
 
 # from lightning.pytorch.callbacks import ModelCheckpoint
 # from lightning.pytorch.callbacks.early_stopping import EarlyStopping
@@ -72,7 +74,7 @@ def set_log(args):
     if not os.path.exists(logs_dir):
         os.makedirs(logs_dir)
     log_name_time = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime(time.time()))
-    log_file_path = os.path.join(logs_dir, f"{args.save_name}-{log_name_time}.log")
+    log_file_path = os.path.join(logs_dir, f"{args.name}-{log_name_time}.log")
 
     # set logging
     logger = logging.getLogger()
@@ -99,9 +101,11 @@ parser = argparse.ArgumentParser(description="MRDF training")
 parser.add_argument("--dataset", type=str, default="fakeavceleb")
 parser.add_argument("--model_type", type=str, default="MRDF_CE")
 parser.add_argument("--data_root", type=str)
-parser.add_argument("--batch_size", type=int, default=32)
+parser.add_argument("--batch_size", type=int, default=64)
 parser.add_argument("--num_workers", type=int, default=16)
-parser.add_argument("--gpus", type=int, default=1)
+
+parser.add_argument("--gpu", type=int, default=2)
+
 parser.add_argument("--precision", default=16)
 parser.add_argument("--num_train", type=int, default=None)
 parser.add_argument("--num_val", type=int, default=None)
@@ -110,7 +114,7 @@ parser.add_argument("--min_epochs", type=int, default=30)
 parser.add_argument("--patience", type=int, default=0)
 parser.add_argument("--log_steps", type=int, default=20)
 parser.add_argument("--resume", type=str, default=None)
-parser.add_argument("--save_name", type=str, default="model")
+# parser.add_argument("--save_name", type=str, default="model")
 parser.add_argument("--learning_rate", type=float, default=1e-3)
 parser.add_argument("--weight_decay", type=float, default=1e-4)
 parser.add_argument("--margin_audio", type=float, default=0.0)
@@ -120,6 +124,8 @@ parser.add_argument("--outputs", type=str, default="outputs")
 parser.add_argument("--loss_type", type=str, default="margin")
 parser.add_argument("--wandb", action="store_true")
 parser.add_argument("--max_frames", type=int, default=500)
+
+parser.add_argument("--name", type=str, default="")
 
 
 def dict_to_str(src_dict):
@@ -171,16 +177,33 @@ if __name__ == "__main__":
 
     model_dict = {
         "MRDF_Margin": MRDF_Margin,
+        "MRDF_Margin_OC": MRDF_Margin_OC,
     }
 
-    if args.wandb:
-        log_name = f"subject_dataset_{args.loss_type}_all_frames"
-        wandb_logger = WandbLogger(project="Margin_light", name=log_name, log_model="all")
-        # wandb.init(project="margin", name=args.log_name)
+    # wandb.init(project="margin", name=args.log_name)
 
-    for train_fold in [""]:
-        # for train_fold in ['train_5.txt', 'train_1.txt']:
-        args.save_name_id = args.save_name + "_" + train_fold[:-4]
+    # for seed in range(3):
+    for train_fold in ["train_1.txt", "train_2.txt", "train_3.txt", "train_4.txt", "train_5.txt"]:
+        if args.wandb:
+            wandb.finish()
+            # Start a new WandB run with a unique name for the current fold
+
+            wandb.init(
+                project="Margin_original_32",
+                name=f"{args.name}_{train_fold}",
+                reinit=True,
+                config={
+                    "model_type": args.name,
+                    "batch_size": args.batch_size,
+                    "learning_rate": args.learning_rate,
+                    "weight_decay": args.weight_decay,
+                },
+            )
+
+            # Create a new WandbLogger for PyTorch Lightning with the current WandB run
+            # Note: No need to pass log_model="all" here, as it's a parameter of `wandb.init`, not `WandbLogger`
+            wandb_logger = WandbLogger(experiment=wandb.run)
+        args.save_name_id = args.name + "_" + train_fold[:-4]
 
         model = model_dict[args.model_type](
             margin_contrast=args.margin_contrast,
@@ -188,8 +211,7 @@ if __name__ == "__main__":
             margin_visual=args.margin_visual,
             weight_decay=weight_decay,
             learning_rate=learning_rate,
-            distributed=args.gpus > 1,
-            loss_type=args.loss_type,
+            # distributed=args.gpus > 1,
             batch_size=args.batch_size,
         )
 
@@ -201,6 +223,8 @@ if __name__ == "__main__":
             max_sample_size=args.max_frames,
             take_train=args.num_train,
             take_dev=args.num_val,
+            # original=True,
+            # seed=seed,
         )
 
         try:
@@ -213,13 +237,6 @@ if __name__ == "__main__":
             monitor=monitor, min_delta=0.00, patience=args.patience, verbose=False, mode="max"
         )
 
-        if args.max_frames == 500:
-            log_name = f"original_dataset_{args.loss_type}_all_frames"
-        else:
-            log_name = f"original_dataset_{args.loss_type}_maxframes:{args.max_frames}"
-
-        # board_logger = TensorBoardLogger("logs", name=log_name)
-
         trainer = Trainer(
             log_every_n_steps=args.log_steps,
             precision=precision,
@@ -229,8 +246,7 @@ if __name__ == "__main__":
                 ModelCheckpoint(
                     dirpath=f"{args.outputs}/ckpts/{args.model_type}",
                     save_last=False,
-                    # filename=args.model_type + "_" + args.save_name_id + "_" + "{epoch}-{val_loss:.3f}",
-                    filename=log_name,
+                    filename=args.model_type + "_" + args.save_name_id + "_" + "{epoch}-{val_loss:.3f}",
                     monitor=monitor,
                     mode="max",
                 ),
@@ -242,8 +258,10 @@ if __name__ == "__main__":
             num_sanity_val_steps=0,
             deterministic="warn",
             accelerator="auto",
-            devices=args.gpus,
-            strategy=None if args.gpus < 2 else "ddp",
+            # devices=args.gpus,
+            devices=[0],
+            # strategy=None if args.gpus < 2 else "ddp",
+            # strategy="ddp",
             resume_from_checkpoint=args.resume,
             logger=wandb_logger,
         )
