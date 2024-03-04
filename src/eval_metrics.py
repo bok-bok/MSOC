@@ -1,6 +1,7 @@
 import sys
 
 import numpy as np
+from sklearn.metrics import roc_curve
 
 
 def obtain_asv_error_rates(tar_asv, non_asv, spoof_asv, asv_threshold):
@@ -30,9 +31,7 @@ def compute_det_curve(target_scores, nontarget_scores):
     tar_trial_sums = np.cumsum(labels)
     nontarget_trial_sums = nontarget_scores.size - (np.arange(1, n_scores + 1) - tar_trial_sums)
 
-    frr = np.concatenate(
-        (np.atleast_1d(0), tar_trial_sums / target_scores.size)
-    )  # false rejection rates
+    frr = np.concatenate((np.atleast_1d(0), tar_trial_sums / target_scores.size))  # false rejection rates
     far = np.concatenate(
         (np.atleast_1d(1), nontarget_trial_sums / nontarget_scores.size)
     )  # false acceptance rates
@@ -50,6 +49,27 @@ def compute_eer(target_scores, nontarget_scores):
     min_index = np.argmin(abs_diffs)
     eer = np.mean((frr[min_index], far[min_index]))
     return eer, thresholds[min_index]
+
+
+# def compute_eer(y_true, y_scores):
+#     """
+#     Compute the Equal Error Rate (EER) for a binary classification task.
+#     """
+#     # Calculate the FPR, TPR, and thresholds using the ROC curve
+#     fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+
+#     # Calculate the False Negative Rate (FNR)
+#     fnr = 1 - tpr
+
+#     # Find the point where the absolute difference between FPR and FNR is minimized
+#     abs_diff = np.abs(fpr - fnr)
+#     index = np.argmin(abs_diff)
+
+#     # EER is the FPR (or FNR) at this index
+#     eer = (fpr[index] + fnr[index]) / 2
+#     threshold = thresholds[index]
+
+#     return eer, threshold
 
 
 def compute_tDCF(
