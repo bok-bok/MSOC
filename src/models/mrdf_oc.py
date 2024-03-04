@@ -16,6 +16,7 @@ import fairseq
 import models.avhubert.hubert as hubert
 import models.avhubert.hubert_pretraining as hubert_pretraining
 import wandb
+from eval_metrics import compute_eer
 from fairseq.data.dictionary import Dictionary
 from fairseq.modules import LayerNorm
 from loss import ContrastLoss, LossComputer, MarginLoss, OCSoftmax
@@ -85,7 +86,8 @@ class MRDF_OC(LightningModule):
             nn.Linear(self.embed, self.embed), nn.ReLU(inplace=True), nn.Linear(self.embed, 2)
         )
 
-        # self.contrast_loss = ContrastLoss(loss_fn=nn.CosineSimilarity(dim=-1), margin=margin_contrast)
+        if margin_contrast != -1:
+            self.contrast_loss = ContrastLoss(loss_fn=nn.CosineSimilarity(dim=-1), margin=margin_contrast)
 
         self.loss_audio = OCSoftmax(feat_dim=768, alpha=20).to(device)
         self.loss_visual = OCSoftmax(feat_dim=768, alpha=20).to(device)
@@ -150,7 +152,12 @@ class MRDF_OC(LightningModule):
         v_loss, _ = self.loss_visual(v_embeds, v_label)
         a_loss, _ = self.loss_audio(a_embeds, a_label)
         av_loss, av_score = self.loss_av(av_feature, m_label)
-        loss = v_loss + a_loss + av_loss
+
+        if self.contrast_loss != -1:
+            contrast_loss = self.contrast_loss(v_embeds, a_embeds, v_label, a_label)
+            loss = v_loss + a_loss + av_loss + contrast_loss
+        else:
+            loss = v_loss + a_loss + av_loss
         result_dict = {
             "loss_dict": {
                 "loss": loss,
@@ -241,7 +248,12 @@ class MRDF_OC(LightningModule):
             batch_size=self.batch_size,
         )
 
-        return {"loss": loss_dict["loss"], "preds": preds.detach(), "targets": batch["m_label"].detach()}
+        return {
+            "loss": loss_dict["loss"],
+            "preds": preds.detach(),
+            "targets": batch["m_label"].detach(),
+            "scores": av_score.data.cpu().numpy(),
+        }
 
     def test_step(
         self,
@@ -271,7 +283,12 @@ class MRDF_OC(LightningModule):
 
         preds = (av_score > self.threshold).float()
 
-        return {"loss": loss_dict["loss"], "preds": preds.detach(), "targets": batch["m_label"].detach()}
+        return {
+            "loss": loss_dict["loss"],
+            "preds": preds.detach(),
+            "targets": batch["m_label"].detach(),
+            "scores": av_score.data.cpu().numpy(),
+        }
 
     def training_step_end(self, training_step_outputs):
         # others: common, ensemble, multi-label
@@ -283,9 +300,14 @@ class MRDF_OC(LightningModule):
 
     def validation_step_end(self, validation_step_outputs):
         # others: common, ensemble, multi-label
+        scores = validation_step_outputs["scores"]
+        targets = validation_step_outputs["targets"]
+
         val_acc = self.acc(validation_step_outputs["preds"], validation_step_outputs["targets"]).item()
         val_auroc = self.auroc(validation_step_outputs["preds"], validation_step_outputs["targets"]).item()
+        val_eer = compute_eer(scores[targets == 1], scores[targets == 0])
 
+        self.log("val_eer", val_eer, prog_bar=True, batch_size=self.batch_size)
         self.log("val_re", val_acc + val_auroc, prog_bar=True, batch_size=self.batch_size)
         self.log("val_acc", val_acc, prog_bar=True, batch_size=self.batch_size)
         self.log("val_auroc", val_auroc, prog_bar=True, batch_size=self.batch_size)
@@ -306,8 +328,17 @@ class MRDF_OC(LightningModule):
         valid_loss = Average([i["loss"] for i in validation_step_outputs]).item()
         preds = [item for list in validation_step_outputs for item in list["preds"]]
         targets = [item for list in validation_step_outputs for item in list["targets"]]
+        scores = [item for list in validation_step_outputs for item in list["scores"]]
+
         preds = torch.stack(preds, dim=0)
         targets = torch.stack(targets, dim=0)
+
+        scores = np.stack(scores, axis=0)
+        numpy_targets = targets.cpu().numpy()
+
+        val_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])
+
+        self.log("val_eer", val_eer, prog_bar=True, batch_size=self.batch_size)
 
         # if valid_loss <= self.best_loss:
         self.best_acc = self.acc(preds, targets).item()
@@ -346,9 +377,15 @@ class MRDF_OC(LightningModule):
         test_loss = Average([i["loss"] for i in test_step_outputs]).item()
         preds = [item for list in test_step_outputs for item in list["preds"]]
         targets = [item for list in test_step_outputs for item in list["targets"]]
+        scores = [item for list in test_step_outputs for item in list["scores"]]
 
         preds = torch.stack(preds, dim=0)
         targets = torch.stack(targets, dim=0)
+
+        scores = np.stack(scores, axis=0)
+        numpy_targets = targets.cpu().numpy()
+
+        test_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])
 
         test_acc = self.acc(preds, targets).item()
         test_auroc = self.auroc(preds, targets).item()
@@ -360,6 +397,7 @@ class MRDF_OC(LightningModule):
         test_fake_recall = self.recall(Opposite(preds), Opposite(targets)).item()
         test_fake_precision = self.precisions(Opposite(preds), Opposite(targets)).item()
 
+        self.log("test_eer", test_eer, batch_size=self.batch_size)
         self.log("test_acc", test_acc, batch_size=self.batch_size)
         self.log("test_auroc", test_auroc, batch_size=self.batch_size)
         self.log("test_real_f1score", test_real_f1score, batch_size=self.batch_size)
