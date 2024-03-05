@@ -239,6 +239,8 @@ class MRDF_OC(LightningModule):
 
         preds = (av_score > self.threshold).float()
 
+        av_score = av_score.data.cpu().numpy()
+
         self.log_dict(
             {f"val_{k}": v for k, v in loss_dict.items()},
             on_step=True,
@@ -252,7 +254,7 @@ class MRDF_OC(LightningModule):
             "loss": loss_dict["loss"],
             "preds": preds.detach(),
             "targets": batch["m_label"].detach(),
-            "scores": av_score.data.cpu().numpy(),
+            "scores": av_score,
         }
 
     def test_step(
@@ -283,11 +285,13 @@ class MRDF_OC(LightningModule):
 
         preds = (av_score > self.threshold).float()
 
+        av_score = av_score.data.cpu().numpy()
+
         return {
             "loss": loss_dict["loss"],
             "preds": preds.detach(),
             "targets": batch["m_label"].detach(),
-            "scores": av_score.data.cpu().numpy(),
+            "scores": av_score,
         }
 
     def training_step_end(self, training_step_outputs):
@@ -300,14 +304,9 @@ class MRDF_OC(LightningModule):
 
     def validation_step_end(self, validation_step_outputs):
         # others: common, ensemble, multi-label
-        scores = validation_step_outputs["scores"]
-        targets = validation_step_outputs["targets"]
-
         val_acc = self.acc(validation_step_outputs["preds"], validation_step_outputs["targets"]).item()
         val_auroc = self.auroc(validation_step_outputs["preds"], validation_step_outputs["targets"]).item()
-        val_eer = compute_eer(scores[targets == 1], scores[targets == 0])
 
-        self.log("val_eer", val_eer, prog_bar=True, batch_size=self.batch_size)
         self.log("val_re", val_acc + val_auroc, prog_bar=True, batch_size=self.batch_size)
         self.log("val_acc", val_acc, prog_bar=True, batch_size=self.batch_size)
         self.log("val_auroc", val_auroc, prog_bar=True, batch_size=self.batch_size)
