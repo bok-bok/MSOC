@@ -43,8 +43,6 @@ class MRDF_OC(LightningModule):
         learning_rate=0.0002,
         distributed=False,
         batch_size=32,
-        loss_type="oc",
-        device="cuda",
     ):
         super().__init__()
         self.model = hubert.AVHubertModel(
@@ -85,14 +83,14 @@ class MRDF_OC(LightningModule):
         self.mm_classifier = nn.Sequential(
             nn.Linear(self.embed, self.embed), nn.ReLU(inplace=True), nn.Linear(self.embed, 2)
         )
-
+        self.margin_contrast = margin_contrast
         if margin_contrast != -1:
             self.contrast_loss = ContrastLoss(loss_fn=nn.CosineSimilarity(dim=-1), margin=margin_contrast)
 
-        self.loss_audio = OCSoftmax(feat_dim=768, alpha=20).to(device)
-        self.loss_visual = OCSoftmax(feat_dim=768, alpha=20).to(device)
+        self.loss_audio = OCSoftmax(feat_dim=768, alpha=20).to("cuda")
+        self.loss_visual = OCSoftmax(feat_dim=768, alpha=20).to("cuda")
 
-        self.loss_av = OCSoftmax(feat_dim=768, alpha=20).to(device)
+        self.loss_av = OCSoftmax(feat_dim=768, alpha=20).to("cuda")
 
         # self.mm_cls = CrossEntropyLoss()
 
@@ -153,8 +151,8 @@ class MRDF_OC(LightningModule):
         a_loss, _ = self.loss_audio(a_embeds, a_label)
         av_loss, av_score = self.loss_av(av_feature, m_label)
 
-        if self.contrast_loss != -1:
-            contrast_loss = self.contrast_loss(v_embeds, a_embeds, v_label, a_label)
+        if self.margin_contrast != -1:
+            contrast_loss = self.contrast_loss(v_embeds, a_embeds, c_label)
             loss = v_loss + a_loss + av_loss + contrast_loss
         else:
             loss = v_loss + a_loss + av_loss
@@ -209,7 +207,7 @@ class MRDF_OC(LightningModule):
             batch_size=self.batch_size,
         )
 
-        return {"loss": loss_dict["av_loss"], "preds": preds.detach(), "targets": batch["m_label"].detach()}
+        return {"loss": loss_dict["loss"], "preds": preds.detach(), "targets": batch["m_label"].detach()}
 
     def validation_step(
         self,
@@ -251,7 +249,7 @@ class MRDF_OC(LightningModule):
         )
 
         return {
-            "loss": loss_dict["loss"],
+            "loss": loss_dict["av_loss"],
             "preds": preds.detach(),
             "targets": batch["m_label"].detach(),
             "scores": av_score,
@@ -288,7 +286,7 @@ class MRDF_OC(LightningModule):
         av_score = av_score.data.cpu().numpy()
 
         return {
-            "loss": loss_dict["loss"],
+            "loss": loss_dict["av_loss"],
             "preds": preds.detach(),
             "targets": batch["m_label"].detach(),
             "scores": av_score,
@@ -335,7 +333,7 @@ class MRDF_OC(LightningModule):
         scores = np.stack(scores, axis=0)
         numpy_targets = targets.cpu().numpy()
 
-        val_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])
+        val_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])[0]
 
         self.log("val_eer", val_eer, prog_bar=True, batch_size=self.batch_size)
 
@@ -384,7 +382,7 @@ class MRDF_OC(LightningModule):
         scores = np.stack(scores, axis=0)
         numpy_targets = targets.cpu().numpy()
 
-        test_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])
+        test_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])[0]
 
         test_acc = self.acc(preds, targets).item()
         test_auroc = self.auroc(preds, targets).item()
