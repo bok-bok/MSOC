@@ -19,6 +19,7 @@ import wandb
 # from dataset.dfdc import DFDCDataModule
 from models.mrdf_margin import MRDF_Margin
 from models.mrdf_margin_oc import MRDF_Margin_OC
+from models.mrdf_oc import MRDF_OC
 from new_datasets.fakeavceleb_light import Fakeavceleb, FakeavcelebDataModule
 
 # from dataset.fakeavceleb import FakeavcelebDataModule
@@ -178,6 +179,7 @@ if __name__ == "__main__":
     model_dict = {
         "MRDF_Margin": MRDF_Margin,
         "MRDF_Margin_OC": MRDF_Margin_OC,
+        "MRDF_OC": MRDF_OC,
     }
 
     # wandb.init(project="margin", name=args.log_name)
