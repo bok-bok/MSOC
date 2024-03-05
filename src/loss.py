@@ -8,9 +8,12 @@ from torch.nn.modules.loss import CrossEntropyLoss
 
 class LossComputer:
     def __init__(self, margin_type, config, device="cuda"):
-        self.contrast_loss_fn = ContrastLoss(
-            loss_fn=nn.CosineSimilarity(dim=-1), margin=config["margin_contrast"]
-        )
+        margin_contrast = config["margin_contrast"]
+        self.margin_contrast = margin_contrast
+        if margin_contrast != None:
+            self.contrast_loss_fn = ContrastLoss(
+                loss_fn=nn.CosineSimilarity(dim=-1), margin=config["margin_contrast"]
+            )
         self.margin_type = margin_type
 
         if margin_type == "margin":
@@ -25,7 +28,7 @@ class LossComputer:
     def compute_loss(
         self, m_logits, v_feats, a_feats, v_embeds, a_embeds, v_label, a_label, c_label, m_label
     ):
-        contrast_loss = self.contrast_loss_fn(v_feats, a_feats, c_label)
+
         v_loss = self.loss_video(v_embeds, v_label)
         a_loss = self.loss_audio(a_embeds, a_label)
         if self.margin_type == "oc":
@@ -33,7 +36,11 @@ class LossComputer:
             a_loss, _ = a_loss
 
         mm_loss = self.mm_cls(m_logits, m_label)
-        loss = mm_loss + a_loss + v_loss + contrast_loss
+        if self.margin_contrast != None:
+            contrast_loss = self.contrast_loss_fn(v_feats, a_feats, c_label)
+            loss = mm_loss + a_loss + v_loss + contrast_loss
+        else:
+            loss = mm_loss + a_loss + v_loss
 
         return {"loss": loss, "mm_loss": mm_loss}
 
@@ -61,8 +68,11 @@ class OCSoftmax(nn.Module):
         scores = x @ w.transpose(0, 1)
         output_scores = scores.clone()
 
-        scores[labels == 0] = self.r_real - scores[labels == 0]
-        scores[labels == 1] = scores[labels == 1] - self.r_fake
+        # scores[labels == 0] = self.r_real - scores[labels == 0]
+        # scores[labels == 1] = scores[labels == 1] - self.r_fake
+
+        scores[labels == 1] = self.r_real - scores[labels == 1]
+        scores[labels == 0] = scores[labels == 0] - self.r_fake
 
         loss = self.softplus(self.alpha * scores).mean()
 
