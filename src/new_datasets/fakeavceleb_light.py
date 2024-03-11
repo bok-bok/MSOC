@@ -236,7 +236,7 @@ class FakeavcelebDataModule(LightningDataModule):
 
     def __init__(
         self,
-        root: str = "data",
+        root: str = "/data/kyungbok/FakeAVCeleb_v1.2",
         train_fold: str = None,
         batch_size: int = 1,
         num_workers: int = 0,
@@ -276,28 +276,56 @@ class FakeavcelebDataModule(LightningDataModule):
     def set_new_dataset(self):
         print("new dataset")
         df = self.metadata
-        train_df_A = df[df["category"] == "A"].sample(400, random_state=42)
-        train_df_B = df[df["category"] == "B"].sample(400, random_state=42)
+
+        train_df_A = df[df["category"] == "A"].sample(350, random_state=42)
+        train_df_B = df[df["category"] == "B"].sample(350, random_state=42)
         train_df_C = (
             df[(df["category"] == "C") & (df["method"] != "faceswap")]
             .groupby("method")
-            .sample(n=200, random_state=42)
+            .sample(n=175, random_state=42)
         )
         train_df_D = (
             df[(df["category"] == "D") & (df["method"] != "faceswap-wav2lip")]
             .groupby("method")
-            .sample(n=200, random_state=42)
+            .sample(n=175, random_state=42)
         )
         self.train_metadata = pd.concat([train_df_A, train_df_B, train_df_C, train_df_D])
 
-        test_df_A = df[df["category"] == "A"].drop(train_df_A.index)
+        val_df_A = df[df["category"] == "A"].drop(train_df_A.index)[:50]
+
+        val_df_B = df[df["category"] == "B"].drop(train_df_B.index)[:50]
+        val_df_C = (
+            df[(df["category"] == "C") & (df["method"] != "faceswap")]
+            .drop(train_df_C.index)
+            .groupby("method")
+            .sample(n=25, random_state=42)
+        )
+        val_df_D = (
+            df[(df["category"] == "D") & (df["method"] != "faceswap-wav2lip")]
+            .drop(train_df_D.index)
+            .groupby("method")
+            .sample(n=25, random_state=42)
+        )
+
+        self.val_metadata = pd.concat([val_df_A, val_df_B, val_df_C, val_df_D])
+
+        test_df_A = df[df["category"] == "A"].drop(train_df_A.index).drop(val_df_A.index)
+        # test_df_A = df[df["category"] == "A"].drop(train_df_A.index)
         # test_df_B = df[df["category"] == "B"].drop(train_df_B.index)
-        test_df_C = df[(df["category"] == "C") & (df["method"] == "faceswap")].sample(n=100)
-        test_df_D = df[(df["category"] == "D") & (df["method"] == "faceswap-wav2lip")].sample(n=100)
+        test_df_C = df[(df["category"] == "C") & (df["method"] == "faceswap")].sample(n=100, random_state=42)
+        test_df_D = df[(df["category"] == "D") & (df["method"] == "faceswap-wav2lip")].sample(
+            n=100, random_state=42
+        )
         self.test_metadata = pd.concat([test_df_A, test_df_C, test_df_D])
+
+        print(len(self.train_metadata), len(self.val_metadata), len(self.test_metadata))
 
         self.train_dataset = self.Dataset(
             "train", self.root, metadata=self.train_metadata, augmentation=self.augmentation
+        )
+
+        self.val_dataset = self.Dataset(
+            "val", self.root, metadata=self.val_metadata, augmentation=self.augmentation
         )
         self.test_dataset = self.Dataset(
             "test", self.root, metadata=self.test_metadata, augmentation=self.augmentation
@@ -445,15 +473,26 @@ class FakeavcelebDataModule(LightningDataModule):
     #                       worker_init_fn=seed_worker, generator=g)
     #
     def val_dataloader(self) -> EVAL_DATALOADERS:
-        return DataLoader(
-            self.test_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            collate_fn=self.collater,
-            worker_init_fn=seed_worker,
-            generator=g,
-        )  # , worker_init_fn=seed_worker, generator=g
+        if self.dataset_type == "original":
+            return DataLoader(
+                self.test_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                collate_fn=self.collater,
+                worker_init_fn=seed_worker,
+                generator=g,
+            )  # , worker_init_fn=seed_worker, generator=g
+        else:
+            return DataLoader(
+                self.val_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                collate_fn=self.collater,
+                worker_init_fn=seed_worker,
+                generator=g,
+            )
 
     def test_dataloader(self) -> EVAL_DATALOADERS:
         return DataLoader(
