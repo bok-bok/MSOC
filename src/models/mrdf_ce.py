@@ -32,7 +32,7 @@ def Opposite(a):
     return a
 
 
-class MRDF_Margin(LightningModule):
+class MRDF_CE(LightningModule):
 
     def __init__(
         self,
@@ -83,9 +83,9 @@ class MRDF_Margin(LightningModule):
         )
 
         self.contrast_loss = ContrastLoss(loss_fn=nn.CosineSimilarity(dim=-1), margin=margin_contrast)
-        self.margin_loss_audio = MarginLoss(loss_fn=nn.CosineSimilarity(dim=-1), margin=margin_audio)
-        self.margin_loss_visual = MarginLoss(loss_fn=nn.CosineSimilarity(dim=-1), margin=margin_visual)
         self.mm_cls = CrossEntropyLoss()
+        self.a_cls = CrossEntropyLoss()
+        self.v_cls = CrossEntropyLoss()
 
         # init loss computer
 
@@ -139,20 +139,17 @@ class MRDF_Margin(LightningModule):
         return m_logits, v_cross_embeds, a_cross_embeds, v_embeds, a_embeds
 
     def loss_fn(
-        self, m_logits, v_feats, a_feats, v_embeds, a_embeds, v_label, a_label, c_label, m_label
+        self, m_logits, v_feats, a_feats, v_logits, a_logits, v_label, a_label, c_label, m_label
     ) -> Dict[str, Tensor]:
 
         contrast_loss = self.contrast_loss(v_feats, a_feats, c_label)
-        v_loss = self.margin_loss_visual(v_embeds, v_label)
-        a_loss = self.margin_loss_audio(a_embeds, a_label)
+        a_loss = self.a_cls(a_logits, a_label)
+        v_loss = self.v_cls(v_logits, v_label)
 
         mm_loss = self.mm_cls(m_logits, m_label)
         loss = mm_loss + a_loss + v_loss + contrast_loss
-        return {"loss": loss, "mm_loss": mm_loss}
 
-        # return self.loss_computer.compute_loss(
-        #     m_logits, v_feats, a_feats, v_embeds, a_embeds, v_label, a_label, c_label, m_label
-        # )
+        return {"loss": loss, "mm_loss": mm_loss}
 
     def training_step(
         self,
