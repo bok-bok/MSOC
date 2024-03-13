@@ -130,6 +130,7 @@ class Fakeavceleb(Dataset):
             s_label = 0  # real_video-fake_audio
         else:
             s_label = 1
+
         path = "/".join(meta.path.split("/")[1:])
         file_path = os.path.join(self.root, path, meta.vid)
 
@@ -142,7 +143,7 @@ class Fakeavceleb(Dataset):
             audio_fn = file_path.replace(".mp4", ".wav")
 
         # print(file_path)
-        video, audio, modified = self.load_feature(video_fn, audio_fn)
+        video, audio, modified = self.load_feature(video_fn, audio_fn, meta.category)
 
         if modified:
             s_label = 0
@@ -177,7 +178,7 @@ class Fakeavceleb(Dataset):
         # feats = np.expand_dims(feats, axis=-1)
         return feats
 
-    def load_feature(self, video_fn, audio_fn):
+    def load_feature(self, video_fn, audio_fn, category):
         """
         Load image and audio feature
         Returns:
@@ -219,9 +220,16 @@ class Fakeavceleb(Dataset):
             if random.random() < p:
                 wav_data = self.audio_augment(samples=wav_data, sample_rate=16000)
                 modified = True
+
+        # if category is F
+        if category == "F":
+            assert self.subset in "test"
+            wav_data = self.audio_augment(samples=wav_data, sample_rate=16000)
+
         if sample_rate != 16_000:
             print("sample_rate", sample_rate)
         assert sample_rate == 16_000 and len(wav_data.shape) == 1
+
         audio_feats = logfbank(wav_data, samplerate=sample_rate).astype(np.float32)  # [T, F]
 
         audio_feats = stacker(
@@ -330,7 +338,9 @@ class FakeavcelebDataModule(LightningDataModule):
             n=100, random_state=42
         )
         test_df_E = df[df["category"] == "E"].sample(n=100, random_state=42)
-        self.test_metadata = pd.concat([test_df_A, test_df_C, test_df_D, test_df_E])
+        test_df_F = df[df["category"] == "F"].sample(n=100, random_state=42)
+
+        self.test_metadata = pd.concat([test_df_A, test_df_C, test_df_D, test_df_E, test_df_F])
         # self.test_metadata = pd.concat([test_df_A, test_df_C, test_df_D])
 
         print(len(self.train_metadata), len(self.val_metadata), len(self.test_metadata))
