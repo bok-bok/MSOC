@@ -132,7 +132,17 @@ class Fakeavceleb(Dataset):
             s_label = 1
         path = "/".join(meta.path.split("/")[1:])
         file_path = os.path.join(self.root, path, meta.vid)
-        video, audio, modified = self.load_feature(file_path)
+
+        file_path = file_path.replace(" (", "_")
+        file_path = file_path.replace(")", "")
+        video_fn = file_path
+        if meta.category == "E":
+            audio_fn = file_path.replace(".mp4", "_sync.wav")
+        else:
+            audio_fn = file_path.replace(".mp4", ".wav")
+
+        # print(file_path)
+        video, audio, modified = self.load_feature(video_fn, audio_fn)
 
         if modified:
             s_label = 0
@@ -167,7 +177,7 @@ class Fakeavceleb(Dataset):
         # feats = np.expand_dims(feats, axis=-1)
         return feats
 
-    def load_feature(self, mix_name):
+    def load_feature(self, video_fn, audio_fn):
         """
         Load image and audio feature
         Returns:
@@ -191,16 +201,17 @@ class Fakeavceleb(Dataset):
             feats = feats.reshape((-1, stack_order, feat_dim)).reshape(-1, stack_order * feat_dim)
             return feats
 
-        video_fn = mix_name
         modified = False
         # video_fn = video_fn.replace(" (", "-")
         # video_fn = video_fn.replace(")", "")
-        audio_fn = video_fn.replace(".mp4", ".wav")
 
         video_feats = self.load_video(video_fn)  # [T, H, W, 1]
 
-        sample_rate, wav_data = wavfile.read(audio_fn)
-        wav_data = wav_data[:, 0]
+        # sample_rate, wav_data = wavfile.read(audio_fn)
+        wav_data, sample_rate = librosa.load(audio_fn, sr=16000)
+
+        if len(wav_data.shape) > 1:
+            wav_data = wav_data[:, 0]
         wav_data = wav_data.astype(np.float32)
 
         if self.augmenation and self.subset in "train":
@@ -208,7 +219,8 @@ class Fakeavceleb(Dataset):
             if random.random() < p:
                 wav_data = self.audio_augment(samples=wav_data, sample_rate=16000)
                 modified = True
-
+        if sample_rate != 16_000:
+            print("sample_rate", sample_rate)
         assert sample_rate == 16_000 and len(wav_data.shape) == 1
         audio_feats = logfbank(wav_data, samplerate=sample_rate).astype(np.float32)  # [T, F]
 
@@ -265,7 +277,7 @@ class FakeavcelebDataModule(LightningDataModule):
         self.dataset_type = dataset_type
 
     def setup(self, stage: Optional[str] = None) -> None:
-        self.metadata = pd.read_csv(os.path.join(self.root, "meta_data.csv"), dtype=dtype)  # .loc
+        self.metadata = pd.read_csv(os.path.join(self.root, "meta_data_added.csv"), dtype=dtype)  # .loc
         print(self.root, self.train_fold)
         self.metadata.columns = dtype.keys()
         if self.dataset_type == "original":
@@ -289,6 +301,7 @@ class FakeavcelebDataModule(LightningDataModule):
             .groupby("method")
             .sample(n=175, random_state=42)
         )
+
         self.train_metadata = pd.concat([train_df_A, train_df_B, train_df_C, train_df_D])
 
         val_df_A = df[df["category"] == "A"].drop(train_df_A.index)[:50]
@@ -316,7 +329,9 @@ class FakeavcelebDataModule(LightningDataModule):
         test_df_D = df[(df["category"] == "D") & (df["method"] == "faceswap-wav2lip")].sample(
             n=100, random_state=42
         )
-        self.test_metadata = pd.concat([test_df_A, test_df_C, test_df_D])
+        test_df_E = df[df["category"] == "E"].sample(n=100, random_state=42)
+        self.test_metadata = pd.concat([test_df_A, test_df_C, test_df_D, test_df_E])
+        # self.test_metadata = pd.concat([test_df_A, test_df_C, test_df_D])
 
         print(len(self.train_metadata), len(self.val_metadata), len(self.test_metadata))
 
@@ -354,8 +369,6 @@ class FakeavcelebDataModule(LightningDataModule):
         self.train_metadata = pd.concat(
             [train_metadata_A, train_metadata_B, train_metadata_C, train_metadata_D]
         )
-        # self.train_metadata = train_metadata
-        #
         test_metadata_A = test_metadata[test_metadata["category"].isin(["A"])][:100]
         test_metadata_B = test_metadata[test_metadata["category"].isin(["B"])][:100]
         test_metadata_C = test_metadata[test_metadata["category"].isin(["C"])][:100]
