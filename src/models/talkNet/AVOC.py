@@ -1,3 +1,4 @@
+import os
 from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
@@ -5,21 +6,17 @@ import torch
 import torch.nn as nn
 import torchmetrics
 from pytorch_lightning import LightningModule
-
-# from lightning import LightningModule
 from torch import Tensor
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-import fairseq
-import models.avhubert.hubert as hubert
-import models.avhubert.hubert_pretraining as hubert_pretraining
-import wandb
 from eval_metrics import compute_eer
-from fairseq.data.dictionary import Dictionary
-from fairseq.modules import LayerNorm
-from loss import ContrastLoss, OCSoftmax
+from loss import OCSoftmax
+from models.SCNet import scnet50_v1d
+from models.talkNet.audioEncoder import audioEncoder
+from models.talkNet.resnet import ResEncoder
+from models.talkNet.visualEncoder import visualConv1D
 
 
 def Average(lst):
@@ -32,81 +29,35 @@ def Opposite(a):
     return a
 
 
-class MSOC(LightningModule):
-
+class AVOC(LightningModule):
     def __init__(
         self,
+        positional_emb_flag=True,
         weight_decay=0.0001,
         learning_rate=0.0002,
-        batch_size=32,
-        sync=False,
-        threshold=False,
-        audio_threshold=0.5,
-        video_threshold=0.5,
-        final_threshold=0.5,
+        batch_size=64,
+        oc_option="both",
+        scnet=False,
+        save_features=False,
+        score_fusion=False,
     ):
-        super().__init__()
-        self.model = hubert.AVHubertModel(
-            cfg=hubert.AVHubertConfig,
-            task_cfg=hubert_pretraining.AVHubertPretrainingConfig,
-            dictionaries=hubert_pretraining.AVHubertPretrainingTask,
-        )
-        self.sync = sync
+        super(AVOC, self).__init__()
+        # self.light = True
+        self.score_fusion = score_fusion
+        if oc_option not in ["no", "audio", "video", "both"]:
+            raise ValueError("Invalid OC option")
+        self.oc_option = oc_option
+        self.save_features = save_features
+        self.features = {
+            "a_features": [],
+            "v_features": [],
+            "a_labels": [],
+            "v_labels": [],
+            "av_labels": [],
+        }
+        print(f"OC option: {self.oc_option}")
 
-        # if true, use threshold not softmax
-        self.threshold = threshold
-
-        self.audio_threshold = audio_threshold
-        self.video_threshold = video_threshold
-        self.final_threshold = final_threshold
-
-        if threshold:
-            print("Using threshold")
-            print(f"Audio: {audio_threshold}, Visual: {video_threshold}, Final: {final_threshold}")
-
-        self.batch_size = batch_size
-        self.embed = 768
-        self.dropout = 0.1
-
-        self.feature_extractor_audio_hubert = self.model.feature_extractor_audio
-        self.feature_extractor_video_hubert = self.model.feature_extractor_video
-        self.project_audio = nn.Sequential(
-            LayerNorm(self.embed), nn.Linear(self.embed, self.embed), nn.Dropout(self.dropout)
-        )
-
-        self.project_video = nn.Sequential(
-            LayerNorm(self.embed), nn.Linear(self.embed, self.embed), nn.Dropout(self.dropout)
-        )
-
-        self.project_hubert = nn.Sequential(
-            self.model.layer_norm, self.model.post_extract_proj, self.model.dropout_input
-        )
-
-        self.fusion_encoder_hubert = self.model.encoder
-
-        self.final_proj_audio = self.model.final_proj
-        self.final_proj_video = self.model.final_proj
-        self.final_proj_hubert = self.model.final_proj
-
-        if not threshold:
-            self.mm_classifier = nn.Sequential(
-                nn.Linear(3, 2),
-            )
-
-        self.loss_audio = OCSoftmax(feat_dim=768, alpha=20).to("cuda")
-        self.loss_visual = OCSoftmax(feat_dim=768, alpha=20).to("cuda")
-
-        self.av_classifier = nn.Sequential(
-            nn.Linear(self.embed, self.embed), nn.ReLU(inplace=True), nn.Linear(self.embed, 2)
-        )
-
-        self.mm_cls = CrossEntropyLoss()
-        self.binary_cls = BCEWithLogitsLoss()
-
-        # init loss computer
-
-        self.weight_decay = weight_decay
-        self.learning_rate = learning_rate
+        self.scnet = scnet
 
         self.acc = torchmetrics.classification.BinaryAccuracy()
         self.auroc = torchmetrics.classification.BinaryAUROC(thresholds=None)
@@ -119,84 +70,138 @@ class MSOC(LightningModule):
         self.best_real_f1score, self.best_real_recall, self.best_real_precision = 0.0, 0.0, 0.0
         self.best_fake_f1score, self.best_fake_recall, self.best_fake_precision = 0.0, 0.0, 0.0
 
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.batch_size = batch_size
+
+        if scnet:
+            self.visualFrontend = scnet50_v1d(30)
+        else:
+            self.visualFrontend = ResEncoder(relu_type="relu", light=True)
+
+            self.visualConv1D = visualConv1D()  # Visual Temporal Network Conv1d
+
+        # Audio Temporal Encoder
+        self.audioEncoder = audioEncoder(layers=[2, 3, 4, 2], num_filters=[16, 32, 64, 128])
+
+        audio_dim = 128
+        if self.scnet:
+            # visual_dim = 1024
+            visual_dim = 512
+        else:
+            visual_dim = 128
+
+        embed_dim = audio_dim + visual_dim
+        self.av_classifier = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim), nn.ReLU(inplace=True), nn.Linear(embed_dim, 2)
+        )
+
+        # loss
+        self.loss_audio = OCSoftmax(feat_dim=audio_dim).to(self.device)
+        self.loss_video = OCSoftmax(feat_dim=visual_dim).to(self.device)
+        self.mm_cls = CrossEntropyLoss()
         self.softmax = nn.Softmax(dim=1)
 
-    def forward(self, video: Tensor, audio: Tensor, mask: Tensor):
-        # print(audio.shape, video.shape)
-        a_features = self.feature_extractor_audio_hubert(audio).transpose(1, 2)
-        v_features = self.feature_extractor_video_hubert(video).transpose(1, 2)
-        # augmentation here
-        # shift augmentation for audio
+    def forward(self, video, audio):
 
-        # warp augmentation for audio
+        # Extract features from the audio and video
+        v_features = self.forward_visual_frontend(video)
+        a_features = self.forward_audio_frontend(audio)
 
-        av_features = torch.cat([a_features, v_features], dim=2)
+        a_features = a_features.mean(dim=1)
+        # if not self.resnet3d:
+        v_features = v_features.mean(dim=1)
+        av_features = torch.cat((a_features, v_features), 1)
+        # av_features = av_features.mean(dim=1)
+        av_logits = self.av_classifier(av_features)
 
-        a_cross_embeds = a_features.mean(1)
-        v_cross_embeds = v_features.mean(1)
+        # print(av_features.shape, a_features.shape, v_features.shape)
 
-        a_features = self.project_audio(a_features)
-        v_features = self.project_video(v_features)
-        av_features = self.project_hubert(av_features)
+        return av_logits, v_features, a_features
 
-        a_embeds = a_features.mean(1)
-        v_embeds = v_features.mean(1)
+    def forward_visual_frontend(self, x):
+        # B, T, W, H = x.shape
+        # x = x.view(B * T, 1, 1, W, H)
+        # x = (x / 255 - 0.4161) / 0.1688
+        if self.scnet:
+            B, C, T, H, W = x.shape
+            x = x.view(B, C * T, H, W)
+            x = x.view((-1, 3) + x.size()[2:])
+            # x = self.model(x)
+            x = self.visualFrontend(x)
+            x = x.view(B, T, -1)
 
-        av_features, _ = self.fusion_encoder_hubert(av_features, padding_mask=mask)
-
-        # extract cls token
-        av_features = av_features[:, 0, :]
-
-        return av_features, v_cross_embeds, a_cross_embeds, v_embeds, a_embeds
-
-    def loss_fn(
-        self, av_feature, v_feats, a_feats, v_embeds, a_embeds, v_label, a_label, c_label, m_label, s_label
-    ) -> Dict[str, Tensor]:
-
-        v_loss, v_score = self.loss_visual(v_embeds, v_label)
-        a_loss, a_score = self.loss_audio(a_embeds, a_label)
-        # av_loss, av_score = self.loss_av(av_feature, m_label)
-        av_logits = self.av_classifier(av_feature)
-
-        if not self.threshold:
-
-            av_score = av_logits[:, 1]
-            all_scores = torch.stack([v_score, a_score, av_score], dim=1)
-
-            logits = self.mm_classifier(all_scores)
-            mm_loss = self.mm_cls(logits, m_label)
-
-            scores = self.softmax(logits)
-            preds = torch.argmax(scores, dim=1)
-            scores = scores[:, 1].data.cpu().numpy()
         else:
-            train_v_value = (v_score + 1) / 2
-            train_a_value = (a_score + 1) / 2
+            x = self.visualFrontend(x)
+            # x = x.view(B, T, 512)
+            x = x.transpose(1, 2)
+            x = self.visualConv1D(x)
+            x = x.transpose(1, 2)
+        return x
 
-            v_value = (v_score > self.video_threshold).float()
-            a_value = (a_score > self.audio_threshold).float()
-            av_value = av_logits[:, 1]
+    def forward_audio_frontend(self, x):
+        # x = x.transpose(1, 2)
+        # x = unstack_features(x)
 
-            train_final_value = ((train_v_value + train_a_value + av_value) / 3).float()
-            mm_loss = self.binary_cls(train_final_value, m_label.float())
+        x = x.unsqueeze(1).transpose(2, 3)
+        x = self.audioEncoder(x)
+        return x
 
-            final_value = (v_value + a_value + av_value) / 3
-            preds = (final_value > self.final_threshold).float()
-            scores = final_value.data.cpu().numpy()
+    def forward_cross_attention(self, x1, x2):
+        x1_c = self.crossA2V(src=x1, tar=x2)
+        x2_c = self.crossV2A(src=x2, tar=x1)
+        return x1_c, x2_c
 
-        if self.sync:
-            av_loss = self.mm_cls(av_logits, s_label)
-            loss = v_loss + a_loss + mm_loss + av_loss
+    def forward_audio_visual_backend(self, x1, x2):
+        x = torch.cat((x1, x2), 2)
+        if self.transformer:
+            x = self.selfAV(src=x)
         else:
+            x = self.selfAV(src=x, tar=x)
+        # x = torch.reshape(x, (-1, 256))
+        return x
+
+    def forward_audio_backend(self, x):
+        if self.projection:
+            x = self.project_audio(x)
+        return x
+
+    def forward_visual_backend(self, x):
+        if self.projection:
+            x = self.project_video(x)
+        return x
+
+    def loss_fn(self, av_logits, v_feats, a_feats, v_label, a_label, m_label):
+        v_loss, v_score = self.loss_video(v_feats, v_label)
+        a_loss, a_score = self.loss_audio(a_feats, a_label)
+
+        # av_logits = self.av_classifier(av_feature)
+        mm_loss = self.mm_cls(av_logits, m_label)
+        if self.oc_option == "no":
+            loss = mm_loss
+        elif self.oc_option == "audio":
+            loss = a_loss + mm_loss
+        elif self.oc_option == "video":
+            loss = v_loss + mm_loss
+        elif self.oc_option == "both":
             loss = v_loss + a_loss + mm_loss
 
-        result_dict = {
-            "loss_dict": {"loss": loss, "mm_loss": mm_loss},
-            "scores": scores,
-            "preds": preds,
-            # "logits": logits,
-        }
+        if self.save_features:
+            self.features["a_features"].extend(a_feats.data.cpu().numpy())
+            self.features["v_features"].extend(v_feats.data.cpu().numpy())
+            self.features["a_labels"].extend(a_label.data.cpu().numpy())
+            self.features["v_labels"].extend(v_label.data.cpu().numpy())
+            self.features["av_labels"].extend(m_label.data.cpu().numpy())
+        av_softmax = self.softmax(av_logits)
+        if self.score_fusion:
+            av_value = av_softmax[:, 1]
+            final_value = ((av_value + v_score + a_score) / 3).float()
+            preds = (final_value > 0.5).float()
 
+        else:
+            preds = torch.argmax(av_softmax, dim=1)
+        loss_dict = {"loss": loss, "mm_loss": mm_loss, "v_loss": v_loss, "a_loss": a_loss}
+        result_dict = {"loss_dict": loss_dict, "preds": preds}
         return result_dict
 
     def training_step(
@@ -206,28 +211,21 @@ class MSOC(LightningModule):
         optimizer_idx: Optional[int] = None,
         hiddens: Optional[Tensor] = None,
     ) -> Tensor:
-        av_features, v_feats, a_feats, v_embeds, a_embeds = self(
-            batch["video"], batch["audio"], batch["padding_mask"]
-        )
+        av_logits, v_feats, a_feats = self(batch["video"], batch["audio"])
         result_dict = self.loss_fn(
-            av_features,
+            av_logits,
             v_feats,
             a_feats,
-            v_embeds,
-            a_embeds,
             batch["v_label"],
             batch["a_label"],
-            batch["c_label"],
             batch["m_label"],
-            batch["s_label"],
         )
-        loss_dict = result_dict["loss_dict"]
 
-        # scores = self.softmax(result_dict["logits"])
-        # preds = torch.argmax(scores, dim=1)
-        # scores = scores[:, 1].data.cpu().numpy()
-
+        # common and multi-class
+        # preds = torch.argmax(self.softmax(av_logits), dim=1)
+        preds = result_dict["preds"]
         #
+        loss_dict = result_dict["loss_dict"]
         self.log_dict(
             {f"train_{k}": v for k, v in loss_dict.items()},
             on_step=True,
@@ -237,11 +235,7 @@ class MSOC(LightningModule):
             batch_size=self.batch_size,
         )
 
-        return {
-            "loss": loss_dict["loss"],
-            "preds": result_dict["preds"],
-            "targets": batch["m_label"].detach(),
-        }
+        return {"loss": loss_dict["loss"], "preds": preds.detach(), "targets": batch["m_label"].detach()}
 
     def validation_step(
         self,
@@ -250,31 +244,23 @@ class MSOC(LightningModule):
         optimizer_idx: Optional[int] = None,
         hiddens: Optional[Tensor] = None,
     ) -> Tensor:
-
-        av_features, v_feats, a_feats, v_embeds, a_embeds = self(
-            batch["video"], batch["audio"], batch["padding_mask"]
-        )
+        av_logits, v_feats, a_feats = self(batch["video"], batch["audio"])
         result_dict = self.loss_fn(
-            av_features,
+            av_logits,
             v_feats,
             a_feats,
-            v_embeds,
-            a_embeds,
             batch["v_label"],
             batch["a_label"],
-            batch["c_label"],
             batch["m_label"],
-            batch["s_label"],
         )
 
-        loss_dict = result_dict["loss_dict"]
-
-        # preds = torch.argmax(self.softmax(result_dict["logits"]), dim=1)
-
-        # scores = self.softmax(result_dict["logits"])
+        # common and multi-class
+        scores = self.softmax(av_logits)
         # preds = torch.argmax(scores, dim=1)
-        # scores = scores[:, 1].data.cpu().numpy()
+        scores = scores[:, 1].data.cpu().numpy()
+        preds = result_dict["preds"]
 
+        loss_dict = result_dict["loss_dict"]
         self.log_dict(
             {f"val_{k}": v for k, v in loss_dict.items()},
             on_step=True,
@@ -285,12 +271,10 @@ class MSOC(LightningModule):
         )
 
         return {
-            "loss": loss_dict["loss"],
-            "preds": result_dict["preds"],
-            # "preds": preds.detach(),
+            "loss": loss_dict["mm_loss"],
+            "preds": preds.detach(),
             "targets": batch["m_label"].detach(),
-            "scores": result_dict["scores"],
-            # "scores": scores,
+            "scores": scores,
         }
 
     def test_step(
@@ -300,35 +284,28 @@ class MSOC(LightningModule):
         optimizer_idx: Optional[int] = None,
         hiddens: Optional[Tensor] = None,
     ) -> Tensor:
-
-        av_features, v_feats, a_feats, v_embeds, a_embeds = self(
-            batch["video"], batch["audio"], batch["padding_mask"]
-        )
+        av_logits, v_feats, a_feats = self(batch["video"], batch["audio"])
         result_dict = self.loss_fn(
-            av_features,
+            av_logits,
             v_feats,
             a_feats,
-            v_embeds,
-            a_embeds,
             batch["v_label"],
             batch["a_label"],
-            batch["c_label"],
             batch["m_label"],
-            batch["s_label"],
         )
-        loss_dict = result_dict["loss_dict"]
-        # preds = torch.argmax(self.softmax(result_dict["logits"]), dim=1)
-        # scores = self.softmax(result_dict["logits"])
-        # preds = torch.argmax(scores, dim=1)
-        # scores = scores[:, 1].data.cpu().numpy()
 
+        # common and multi-class
+        scores = self.softmax(av_logits)
+        # preds = torch.argmax(scores, dim=1)
+        scores = scores[:, 1].data.cpu().numpy()
+        preds = result_dict["preds"]
+
+        loss_dict = result_dict["loss_dict"]
         return {
-            "loss": loss_dict["loss"],
-            "preds": result_dict["preds"],
-            # "preds": preds.detach(),
+            "loss": loss_dict["mm_loss"],
+            "preds": preds.detach(),
             "targets": batch["m_label"].detach(),
-            "scores": result_dict["scores"],
-            # "scores": scores,
+            "scores": scores,
         }
 
     def training_step_end(self, training_step_outputs):
@@ -341,12 +318,16 @@ class MSOC(LightningModule):
 
     def validation_step_end(self, validation_step_outputs):
         # others: common, ensemble, multi-label
+        scores = validation_step_outputs["scores"]
+        scores = torch.tensor(scores)
+
         val_acc = self.acc(validation_step_outputs["preds"], validation_step_outputs["targets"]).item()
+        # val_auroc = self.auroc(scores, validation_step_outputs["targets"].cpu()).item()
         val_auroc = self.auroc(validation_step_outputs["preds"], validation_step_outputs["targets"]).item()
 
         self.log("val_re", val_acc + val_auroc, prog_bar=True, batch_size=self.batch_size)
         self.log("val_acc", val_acc, prog_bar=True, batch_size=self.batch_size)
-        self.log("val_auroc", val_auroc, prog_bar=True, batch_size=self.batch_size)
+        # self.log("val_auroc", val_auroc, prog_bar=True, batch_size=self.batch_size)
 
     def training_epoch_end(self, training_step_outputs):
         train_loss = Average([i["loss"] for i in training_step_outputs]).item()
@@ -371,10 +352,7 @@ class MSOC(LightningModule):
 
         scores = np.stack(scores, axis=0)
         numpy_targets = targets.cpu().numpy()
-
         val_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])[0]
-
-        self.log("val_eer", val_eer, prog_bar=True, batch_size=self.batch_size)
 
         # if valid_loss <= self.best_loss:
         self.best_acc = self.acc(preds, targets).item()
@@ -386,6 +364,11 @@ class MSOC(LightningModule):
         self.best_fake_f1score = self.f1score(Opposite(preds), Opposite(targets)).item()
         self.best_fake_recall = self.recall(Opposite(preds), Opposite(targets)).item()
         self.best_fake_precision = self.precisions(Opposite(preds), Opposite(targets)).item()
+
+        self.log("val_eer", val_eer, batch_size=self.batch_size)
+        self.log("val_real_f1score", self.best_real_f1score, batch_size=self.batch_size)
+        self.log("val_fake_f1score", self.best_fake_f1score, batch_size=self.batch_size)
+        self.log("val_auroc", self.best_auroc, batch_size=self.batch_size)
 
         self.best_loss = valid_loss
         print(
@@ -420,11 +403,12 @@ class MSOC(LightningModule):
 
         scores = np.stack(scores, axis=0)
         numpy_targets = targets.cpu().numpy()
-
         test_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])[0]
+        scores = torch.tensor(scores)
 
         test_acc = self.acc(preds, targets).item()
-        test_auroc = self.auroc(preds, targets).item()
+        # test_auroc = self.auroc(preds, targets).item()
+        test_auroc = self.auroc(scores, targets.cpu()).item()
         test_real_f1score = self.f1score(preds, targets).item()
         test_real_recall = self.recall(preds, targets).item()
         test_real_precision = self.precisions(preds, targets).item()
@@ -432,6 +416,18 @@ class MSOC(LightningModule):
         test_fake_f1score = self.f1score(Opposite(preds), Opposite(targets)).item()
         test_fake_recall = self.recall(Opposite(preds), Opposite(targets)).item()
         test_fake_precision = self.precisions(Opposite(preds), Opposite(targets)).item()
+
+        if self.save_features:
+            name = "talknet"
+            if self.oc_option == "no":
+                name += "_no"
+            else:
+                name += "_both"
+            path = "/data/kyungbok/outputs/features"
+            if not os.path.exists(path):
+                os.makedirs(path)
+            print(f"Saving features length of {len(self.features['a_labels'])}")
+            np.save(f"{path}/{name}.npy", self.features, allow_pickle=True)
 
         self.log("test_eer", test_eer, batch_size=self.batch_size)
         self.log("test_acc", test_acc, batch_size=self.batch_size)

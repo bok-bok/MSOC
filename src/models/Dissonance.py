@@ -19,7 +19,18 @@ import wandb
 from eval_metrics import compute_eer
 from fairseq.data.dictionary import Dictionary
 from fairseq.modules import LayerNorm
-from loss import ContrastLoss, LossComputer, MarginLoss, OCSoftmax
+from loss import ContrastLoss, MarginLoss
+from models.ACM_MM_2020.model import Audio_RNN
+from models.ACM_MM_2020.utils import (
+    AverageMeter,
+    ConfusionMeter,
+    calc_accuracy,
+    calc_loss,
+    denorm,
+    get_pred,
+    save_checkpoint,
+    write_log,
+)
 
 
 def Average(lst):
@@ -32,69 +43,20 @@ def Opposite(a):
     return a
 
 
-class MRDF_OC(LightningModule):
+class Dissonance(LightningModule):
 
     def __init__(
         self,
-        margin_contrast=0.0,
-        margin_audio=0.0,
-        margin_visual=0.0,
         weight_decay=0.0001,
         learning_rate=0.0002,
         distributed=False,
-        batch_size=32,
+        batch_size=64,
     ):
         super().__init__()
-        self.model = hubert.AVHubertModel(
-            cfg=hubert.AVHubertConfig,
-            task_cfg=hubert_pretraining.AVHubertPretrainingConfig,
-            dictionaries=hubert_pretraining.AVHubertPretrainingTask,
-        )
-
-        self.threshold = 0.5
 
         self.batch_size = batch_size
-        self.embed = 768
-        self.dropout = 0.1
 
-        self.feature_extractor_audio_hubert = self.model.feature_extractor_audio
-        self.feature_extractor_video_hubert = self.model.feature_extractor_video
-
-        self.project_audio = nn.Sequential(
-            LayerNorm(self.embed), nn.Linear(self.embed, self.embed), nn.Dropout(self.dropout)
-        )
-
-        self.project_video = nn.Sequential(
-            LayerNorm(self.embed), nn.Linear(self.embed, self.embed), nn.Dropout(self.dropout)
-        )
-
-        self.project_hubert = nn.Sequential(
-            self.model.layer_norm, self.model.post_extract_proj, self.model.dropout_input
-        )
-
-        # self.fusion_encoder_audio = self.model.encoder
-        # self.fusion_encoder_video = self.model.encoder
-        self.fusion_encoder_hubert = self.model.encoder
-
-        self.final_proj_audio = self.model.final_proj
-        self.final_proj_video = self.model.final_proj
-        self.final_proj_hubert = self.model.final_proj
-
-        self.mm_classifier = nn.Sequential(
-            nn.Linear(self.embed, self.embed), nn.ReLU(inplace=True), nn.Linear(self.embed, 2)
-        )
-        self.margin_contrast = margin_contrast
-        if margin_contrast != -1:
-            self.contrast_loss = ContrastLoss(loss_fn=nn.CosineSimilarity(dim=-1), margin=margin_contrast)
-
-        self.loss_audio = OCSoftmax(feat_dim=768, alpha=20).to("cuda")
-        self.loss_visual = OCSoftmax(feat_dim=768, alpha=20).to("cuda")
-
-        self.loss_av = OCSoftmax(feat_dim=768, alpha=20).to("cuda")
-
-        # self.mm_cls = CrossEntropyLoss()
-
-        # init loss computer
+        self.model = Audio_RNN(img_dim=100, network="resnet18", num_layers_in_fc_layers=512)
 
         self.weight_decay = weight_decay
         self.learning_rate = learning_rate
@@ -111,64 +73,37 @@ class MRDF_OC(LightningModule):
         self.best_real_f1score, self.best_real_recall, self.best_real_precision = 0.0, 0.0, 0.0
         self.best_fake_f1score, self.best_fake_recall, self.best_fake_precision = 0.0, 0.0, 0.0
 
-        # self.softmax = nn.Softmax(dim=1)
+        self.criterion = nn.CrossEntropyLoss()
+        # self.threshold = 0.9
+        # self.hyper_param = 0.99
+        self.threshold = 1.5
+        self.hyper_param = 1.99
 
-    def forward(self, video: Tensor, audio: Tensor, mask: Tensor):
-        # print(audio.shape, video.shape)
-        a_features = self.feature_extractor_audio_hubert(audio).transpose(1, 2)
-        v_features = self.feature_extractor_video_hubert(video).transpose(1, 2)
-        av_features = torch.cat([a_features, v_features], dim=2)
+        self.softmax = nn.Softmax(dim=1)
 
-        a_cross_embeds = a_features.mean(1)
-        v_cross_embeds = v_features.mean(1)
+    def forward(self, video: Tensor, audio: Tensor):
+        audio = audio.transpose(1, 2)
+        audio = audio.unsqueeze(1).unsqueeze(1)
 
-        a_features = self.project_audio(a_features)
-        v_features = self.project_video(v_features)
-        av_features = self.project_hubert(av_features)
+        video = video.unsqueeze(1)
 
-        a_embeds = a_features.mean(1)
-        v_embeds = v_features.mean(1)
+        vid_out = self.model.forward_lip(video)
+        aud_out = self.model.forward_aud(audio)
 
-        av_features, _ = self.fusion_encoder_hubert(av_features, padding_mask=mask)
+        vid_class = self.model.final_classification_lip(vid_out)
+        aud_class = self.model.final_classification_aud(aud_out)
 
-        # extract cls token
-        av_features = av_features[:, 0, :]
+        return vid_out, aud_out, vid_class, aud_class
+        # return m_logits, v_cross_embeds, a_cross_embeds, v_embeds, a_embeds
 
-        # print(av_features.shape)
-        # print(av_features[:, 0, :].shape)
-        # m_logits = self.mm_classifier(av_features[:, 0, :])
+    def loss_fn(self, vid_out, aud_out, vid_class, aud_class, m_label) -> Dict[str, Tensor]:
 
-        # m_logits = a_embeds + v_embeds
-        # m_logits = a_embeds
+        loss1 = calc_loss(vid_out, aud_out, m_label, self.hyper_param)
+        loss2 = self.criterion(vid_class, m_label)
+        loss3 = self.criterion(aud_class, m_label)
 
-        return av_features, v_cross_embeds, a_cross_embeds, v_embeds, a_embeds
-
-    def loss_fn(
-        self, av_feature, v_feats, a_feats, v_embeds, a_embeds, v_label, a_label, c_label, m_label
-    ) -> Dict[str, Tensor]:
-
-        v_loss, _ = self.loss_visual(v_embeds, v_label)
-        a_loss, _ = self.loss_audio(a_embeds, a_label)
-        av_loss, av_score = self.loss_av(av_feature, m_label)
-
-        if self.margin_contrast != -1:
-            contrast_loss = self.contrast_loss(v_embeds, a_embeds, c_label)
-            loss = v_loss + a_loss + av_loss + contrast_loss
-        else:
-            loss = v_loss + a_loss + av_loss
-        result_dict = {
-            "loss_dict": {
-                "loss": loss,
-                "av_loss": av_loss,
-            },
-            "av_score": av_score,
-        }
-
-        return result_dict
-
-        # mm_loss = self.mm_cls(m_logits, m_label)
-        # loss = mm_loss + a_loss + v_loss + contrast_loss
-        # return {"loss": loss, "mm_loss": mm_loss}
+        loss = loss1 + loss2 + loss3
+        return {"loss": loss}
 
     def training_step(
         self,
@@ -177,27 +112,15 @@ class MRDF_OC(LightningModule):
         optimizer_idx: Optional[int] = None,
         hiddens: Optional[Tensor] = None,
     ) -> Tensor:
-        av_features, v_feats, a_feats, v_embeds, a_embeds = self(
-            batch["video"], batch["audio"], batch["padding_mask"]
-        )
-        result_dict = self.loss_fn(
-            av_features,
-            v_feats,
-            a_feats,
-            v_embeds,
-            a_embeds,
-            batch["v_label"],
-            batch["a_label"],
-            batch["c_label"],
+        vid_out, aud_out, vid_class, aud_class = self(batch["video"], batch["audio"])
+        loss_dict = self.loss_fn(
+            vid_out,
+            aud_out,
+            vid_class,
+            aud_class,
             batch["m_label"],
         )
-        loss_dict = result_dict["loss_dict"]
 
-        av_score = result_dict["av_score"]
-
-        preds = (av_score > self.threshold).float()
-
-        #
         self.log_dict(
             {f"train_{k}": v for k, v in loss_dict.items()},
             on_step=True,
@@ -207,7 +130,13 @@ class MRDF_OC(LightningModule):
             batch_size=self.batch_size,
         )
 
-        return {"loss": loss_dict["loss"], "preds": preds.detach(), "targets": batch["m_label"].detach()}
+        preds = get_pred(vid_out, aud_out, self.threshold)
+
+        return {
+            "loss": loss_dict["loss"],
+            "preds": preds.detach().cpu(),
+            "targets": batch["m_label"].detach().cpu(),
+        }
 
     def validation_step(
         self,
@@ -217,27 +146,16 @@ class MRDF_OC(LightningModule):
         hiddens: Optional[Tensor] = None,
     ) -> Tensor:
 
-        av_features, v_feats, a_feats, v_embeds, a_embeds = self(
-            batch["video"], batch["audio"], batch["padding_mask"]
-        )
-        result_dict = self.loss_fn(
-            av_features,
-            v_feats,
-            a_feats,
-            v_embeds,
-            a_embeds,
-            batch["v_label"],
-            batch["a_label"],
-            batch["c_label"],
+        vid_out, aud_out, vid_class, aud_class = self(batch["video"], batch["audio"])
+        loss_dict = self.loss_fn(
+            vid_out,
+            aud_out,
+            vid_class,
+            aud_class,
             batch["m_label"],
         )
-        loss_dict = result_dict["loss_dict"]
-
-        av_score = result_dict["av_score"]
-
-        preds = (av_score > self.threshold).float()
-
-        av_score = av_score.data.cpu().numpy()
+        # common and multi-class
+        preds = get_pred(vid_out, aud_out, self.threshold)
 
         self.log_dict(
             {f"val_{k}": v for k, v in loss_dict.items()},
@@ -249,10 +167,9 @@ class MRDF_OC(LightningModule):
         )
 
         return {
-            "loss": loss_dict["av_loss"],
-            "preds": preds.detach(),
-            "targets": batch["m_label"].detach(),
-            "scores": av_score,
+            "loss": loss_dict["loss"],
+            "preds": preds.detach().cpu(),
+            "targets": batch["m_label"].detach().cpu(),
         }
 
     def test_step(
@@ -263,33 +180,22 @@ class MRDF_OC(LightningModule):
         hiddens: Optional[Tensor] = None,
     ) -> Tensor:
 
-        av_features, v_feats, a_feats, v_embeds, a_embeds = self(
-            batch["video"], batch["audio"], batch["padding_mask"]
-        )
-        result_dict = self.loss_fn(
-            av_features,
-            v_feats,
-            a_feats,
-            v_embeds,
-            a_embeds,
-            batch["v_label"],
-            batch["a_label"],
-            batch["c_label"],
+        vid_out, aud_out, vid_class, aud_class = self(batch["video"], batch["audio"])
+        loss_dict = self.loss_fn(
+            vid_out,
+            aud_out,
+            vid_class,
+            aud_class,
             batch["m_label"],
         )
-        loss_dict = result_dict["loss_dict"]
 
-        av_score = result_dict["av_score"]
-
-        preds = (av_score > self.threshold).float()
-
-        av_score = av_score.data.cpu().numpy()
+        # common and multi-class
+        preds = get_pred(vid_out, aud_out, self.threshold)
 
         return {
-            "loss": loss_dict["av_loss"],
-            "preds": preds.detach(),
-            "targets": batch["m_label"].detach(),
-            "scores": av_score,
+            "loss": loss_dict["loss"],
+            "preds": preds.detach().cpu(),
+            "targets": batch["m_label"].detach().cpu(),
         }
 
     def training_step_end(self, training_step_outputs):
@@ -307,7 +213,7 @@ class MRDF_OC(LightningModule):
 
         self.log("val_re", val_acc + val_auroc, prog_bar=True, batch_size=self.batch_size)
         self.log("val_acc", val_acc, prog_bar=True, batch_size=self.batch_size)
-        self.log("val_auroc", val_auroc, prog_bar=True, batch_size=self.batch_size)
+        # self.log("val_auroc", val_auroc, prog_bar=True, batch_size=self.batch_size)
 
     def training_epoch_end(self, training_step_outputs):
         train_loss = Average([i["loss"] for i in training_step_outputs]).item()
@@ -325,17 +231,14 @@ class MRDF_OC(LightningModule):
         valid_loss = Average([i["loss"] for i in validation_step_outputs]).item()
         preds = [item for list in validation_step_outputs for item in list["preds"]]
         targets = [item for list in validation_step_outputs for item in list["targets"]]
-        scores = [item for list in validation_step_outputs for item in list["scores"]]
+        # scores = [item for list in validation_step_outputs for item in list["scores"]]
 
         preds = torch.stack(preds, dim=0)
         targets = torch.stack(targets, dim=0)
 
-        scores = np.stack(scores, axis=0)
-        numpy_targets = targets.cpu().numpy()
-
-        val_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])[0]
-
-        self.log("val_eer", val_eer, prog_bar=True, batch_size=self.batch_size)
+        # scores = np.stack(scores, axis=0)
+        # numpy_targets = targets.cpu().numpy()
+        # val_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])[0]
 
         # if valid_loss <= self.best_loss:
         self.best_acc = self.acc(preds, targets).item()
@@ -347,6 +250,11 @@ class MRDF_OC(LightningModule):
         self.best_fake_f1score = self.f1score(Opposite(preds), Opposite(targets)).item()
         self.best_fake_recall = self.recall(Opposite(preds), Opposite(targets)).item()
         self.best_fake_precision = self.precisions(Opposite(preds), Opposite(targets)).item()
+
+        self.log("val_real_f1score", self.best_real_f1score, batch_size=self.batch_size)
+        self.log("val_fake_f1score", self.best_fake_f1score, batch_size=self.batch_size)
+        self.log("val_auroc", self.best_auroc, batch_size=self.batch_size)
+        # self.log("val_eer", val_eer, batch_size=self.batch_size)
 
         self.best_loss = valid_loss
         print(
@@ -374,15 +282,15 @@ class MRDF_OC(LightningModule):
         test_loss = Average([i["loss"] for i in test_step_outputs]).item()
         preds = [item for list in test_step_outputs for item in list["preds"]]
         targets = [item for list in test_step_outputs for item in list["targets"]]
-        scores = [item for list in test_step_outputs for item in list["scores"]]
+        # scores = [item for list in test_step_outputs for item in list["scores"]]
 
         preds = torch.stack(preds, dim=0)
         targets = torch.stack(targets, dim=0)
-
-        scores = np.stack(scores, axis=0)
-        numpy_targets = targets.cpu().numpy()
-
-        test_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])[0]
+        # scores = torch.stack(scores, dim=0)
+        # scores is numpy
+        # scores = np.stack(scores, axis=0)
+        # numpy_targets = targets.cpu().numpy()
+        # test_eer = compute_eer(scores[numpy_targets == 1], scores[numpy_targets == 0])[0]
 
         test_acc = self.acc(preds, targets).item()
         test_auroc = self.auroc(preds, targets).item()
@@ -394,7 +302,7 @@ class MRDF_OC(LightningModule):
         test_fake_recall = self.recall(Opposite(preds), Opposite(targets)).item()
         test_fake_precision = self.precisions(Opposite(preds), Opposite(targets)).item()
 
-        self.log("test_eer", test_eer, batch_size=self.batch_size)
+        # self.log("test_eer", test_eer, batch_size=self.batch_size)
         self.log("test_acc", test_acc, batch_size=self.batch_size)
         self.log("test_auroc", test_auroc, batch_size=self.batch_size)
         self.log("test_real_f1score", test_real_f1score, batch_size=self.batch_size)

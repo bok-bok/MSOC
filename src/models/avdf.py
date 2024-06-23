@@ -48,6 +48,7 @@ class AVDF(LightningModule):
 
         self.embed = 768
         self.dropout = 0.1
+        self.batch_size = batch_size
 
         self.feature_extractor_audio_hubert = self.model.feature_extractor_audio
         self.feature_extractor_video_hubert = self.model.feature_extractor_video
@@ -105,7 +106,7 @@ class AVDF(LightningModule):
         v_features = self.project_video(v_features)
         av_features = self.project_hubert(av_features)
 
-        av_features, _ = self.fusion_encoder_hubert(av_features, padding_mask=mask)
+        av_features, _ = self.fusion_encoder_hubert(av_features)
         m_logits = self.mm_classifier(av_features[:, 0, :])
 
         return m_logits
@@ -184,7 +185,7 @@ class AVDF(LightningModule):
 
         self.log("val_re", val_acc + val_auroc, prog_bar=True)
         self.log("val_acc", val_acc, prog_bar=True)
-        self.log("val_auroc", val_auroc, prog_bar=True)
+        # self.log("val_auroc", val_auroc, prog_bar=True)
 
     def training_epoch_end(self, training_step_outputs):
         train_loss = Average([i["loss"] for i in training_step_outputs]).item()
@@ -214,6 +215,10 @@ class AVDF(LightningModule):
         self.best_fake_f1score = self.f1score(Opposite(preds), Opposite(targets)).item()
         self.best_fake_recall = self.recall(Opposite(preds), Opposite(targets)).item()
         self.best_fake_precision = self.precisions(Opposite(preds), Opposite(targets)).item()
+
+        self.log("val_real_f1score", self.best_real_f1score, batch_size=self.batch_size)
+        self.log("val_fake_f1score", self.best_fake_f1score, batch_size=self.batch_size)
+        self.log("val_auroc", self.best_auroc, batch_size=self.batch_size)
 
         self.best_loss = valid_loss
         print(

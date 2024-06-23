@@ -40,7 +40,6 @@ if DBG:
         stream=sys.stdout,
     )
     from decoder import TransformerDecoder
-
     from utils import compute_mask_indices
 
 else:
@@ -279,6 +278,7 @@ class SubModel(nn.Module):
         print(input_dim, cfg.encoder_embed_dim)
         self.proj = nn.Linear(input_dim, cfg.encoder_embed_dim)
         self.encoder = TransformerEncoder(cfg) if cfg.encoder_layers > 0 else None
+        print(self.encoder)
 
     def forward(self, x):
         if self.resnet is not None:

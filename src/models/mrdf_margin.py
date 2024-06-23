@@ -130,7 +130,8 @@ class MRDF_Margin(LightningModule):
         a_embeds = a_features.mean(1)
         v_embeds = v_features.mean(1)
 
-        av_features, _ = self.fusion_encoder_hubert(av_features, padding_mask=mask)
+        # av_features, _ = self.fusion_encoder_hubert(av_features, padding_mask=mask)
+        av_features, _ = self.fusion_encoder_hubert(av_features)
         m_logits = self.mm_classifier(av_features[:, 0, :])
 
         # m_logits = a_embeds + v_embeds
@@ -148,7 +149,7 @@ class MRDF_Margin(LightningModule):
 
         mm_loss = self.mm_cls(m_logits, m_label)
         loss = mm_loss + a_loss + v_loss + contrast_loss
-        return {"loss": loss, "mm_loss": mm_loss}
+        return {"loss": loss, "mm_loss": mm_loss, "v_loss": v_loss, "a_loss": a_loss}
 
         # return self.loss_computer.compute_loss(
         #     m_logits, v_feats, a_feats, v_embeds, a_embeds, v_label, a_label, c_label, m_label
@@ -283,7 +284,7 @@ class MRDF_Margin(LightningModule):
 
         self.log("val_re", val_acc + val_auroc, prog_bar=True, batch_size=self.batch_size)
         self.log("val_acc", val_acc, prog_bar=True, batch_size=self.batch_size)
-        self.log("val_auroc", val_auroc, prog_bar=True, batch_size=self.batch_size)
+        # self.log("val_auroc", val_auroc, prog_bar=True, batch_size=self.batch_size)
 
     def training_epoch_end(self, training_step_outputs):
         train_loss = Average([i["loss"] for i in training_step_outputs]).item()
@@ -321,6 +322,9 @@ class MRDF_Margin(LightningModule):
         self.best_fake_recall = self.recall(Opposite(preds), Opposite(targets)).item()
         self.best_fake_precision = self.precisions(Opposite(preds), Opposite(targets)).item()
 
+        self.log("val_real_f1score", self.best_real_f1score, batch_size=self.batch_size)
+        self.log("val_fake_f1score", self.best_fake_f1score, batch_size=self.batch_size)
+        self.log("val_auroc", self.best_auroc, batch_size=self.batch_size)
         self.log("val_eer", val_eer, batch_size=self.batch_size)
 
         self.best_loss = valid_loss
