@@ -11,14 +11,14 @@ from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from eval_metrics import compute_eer
-from loss import OCSoftmax
 from models.SCNet import scnet50_v1d
 
 # from src.models.archive.attentionLayer import attentionLayer
 from models.talkNet.audioEncoder import audioEncoder
 from models.talkNet.resnet import ResEncoder
 from models.talkNet.visualEncoder import visualConv1D, visualFrontend, visualTCN
+from util.eval_metrics import compute_eer
+from util.loss import OCSoftmax
 
 
 def Average(lst):

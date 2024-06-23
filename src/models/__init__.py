@@ -6,5 +6,5 @@ from models.avdf_multilabel import AVDF_Multilabel
 from models.Dissonance import Dissonance
 from models.mrdf_ce import MRDF_CE
 from models.mrdf_margin import MRDF_Margin
-from src.models.talkNet.AVOC import AVOC
-from src.models.talkNet.MSOC import MSOC
+from models.talkNet.AVOC import AVOC
+from models.talkNet.MSOC import MSOC

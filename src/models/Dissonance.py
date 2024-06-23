@@ -16,10 +16,8 @@ import fairseq
 import models.avhubert.hubert as hubert
 import models.avhubert.hubert_pretraining as hubert_pretraining
 import wandb
-from eval_metrics import compute_eer
 from fairseq.data.dictionary import Dictionary
 from fairseq.modules import LayerNorm
-from loss import ContrastLoss, MarginLoss
 from models.ACM_MM_2020.model import Audio_RNN
 from models.ACM_MM_2020.utils import (
     AverageMeter,
@@ -31,6 +29,8 @@ from models.ACM_MM_2020.utils import (
     save_checkpoint,
     write_log,
 )
+from util.eval_metrics import compute_eer
+from util.loss import ContrastLoss, MarginLoss
 
 
 def Average(lst):
