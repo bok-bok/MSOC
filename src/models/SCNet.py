@@ -1,3 +1,4 @@
+# The code is adapted from https://github.com/Tencent/TFace/blob/master/security/tasks/Face-Forgery-Detection/STIL/models/ops.py
 import math
 
 import numpy as np
@@ -5,10 +6,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
-
-model_urls = {
-    "scnet50_v1d": "https://backseason.oss-cn-beijing.aliyuncs.com/scnet/scnet50_v1d-4109d1e1.pth",
-}
 
 
 class ISM_Module(nn.Module):

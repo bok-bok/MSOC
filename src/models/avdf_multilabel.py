@@ -1,3 +1,4 @@
+# the code is based on the following repository: https://github.com/Vincent-ZHQ/MRDF/blob/main/model/avdf_multilabel.py
 from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np

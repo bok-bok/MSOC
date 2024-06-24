@@ -154,7 +154,6 @@ class Dissonance(LightningModule):
             aud_class,
             batch["m_label"],
         )
-        # common and multi-class
         preds = get_pred(vid_out, aud_out, self.threshold)
 
         self.log_dict(
