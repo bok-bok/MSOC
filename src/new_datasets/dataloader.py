@@ -308,7 +308,6 @@ class FakeavcelebDataModule(LightningDataModule):
     def __init__(
         self,
         root: str = "/data/kyungbok/FakeAVCeleb_v1.2",
-        train_fold: str = "train_1.txt",
         batch_size: int = 1,
         num_workers: int = 0,
         max_sample_size=30,
@@ -334,7 +333,6 @@ class FakeavcelebDataModule(LightningDataModule):
         self.pad_audio = False
         self.random_crop = False
         self.max_sample_size = max_sample_size
-        self.train_fold = train_fold
         # self.augmentation = augmentation
         self.dataset_type = dataset_type
         self.test_subset = test_subset
@@ -343,7 +341,6 @@ class FakeavcelebDataModule(LightningDataModule):
 
     def setup(self, stage: Optional[str] = None) -> None:
         self.metadata = pd.read_csv(os.path.join(self.root, "meta_data_added.csv"), dtype=dtype)  # .loc
-        print(self.root, self.train_fold)
         self.metadata.columns = dtype.keys()
         # if self.dataset_type == "original":
         #     self.set_original_dataset()
