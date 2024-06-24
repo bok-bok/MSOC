@@ -142,7 +142,6 @@ if __name__ == "__main__":
     results = []
     args.file_name = args.learning_rate
     # wandb.init(project="margin", name=args.log_name)
-    train_fold = "train_1.txt"
     model_dict = {
         "MRDF_Margin": MRDF_Margin,
         "MRDF_CE": MRDF_CE,
@@ -152,7 +151,6 @@ if __name__ == "__main__":
 
     # for one_run in [42]:
     set_seed(args.random_seed)
-    # for train_fold in ["train_1.txt"]:
     name = f"{args.name}_{args.learning_rate}"
     wandb_name = f"{args.name}_{args.random_seed}"
 
