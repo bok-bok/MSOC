@@ -5,7 +5,7 @@ This repository contains the official implementation of our paper, "A Multi-Stre
 
 # Requirement 
 ---
-python==3.9
+python==3.9 \\
 pytorch-lightning=1.7.7
 
 # Data Preparation
